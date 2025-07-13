@@ -1,0 +1,32 @@
+{
+  "name": "burn",
+  "version": "1.0.0",
+  "description": "I need to watch it burn",
+  "keywords": [
+    "burn",
+    "fire",
+    "notes"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "empty"
+  },
+  "license": "MIT",
+  "author": "Zaista",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "test": "test"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "24.0.10",
+    "typescript": "5.8.3"
+  },
+  "dependencies": {
+    "cors": "2.8.5",
+    "express": "5.1.0",
+    "mongoose": "8.16.1",
+    "socket.io": "4.8.1"
+  }
+}

@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "jsx": "react",
     "module": "ESNext",
     "esModuleInterop": true,
     "target": "es2017",
@@ -9,6 +10,5 @@
     "outDir": "./dist",
     "rootDir": "./src"
   },
-  "lib": ["dom es2015"],
-  "exclude": ["my-app"]
+  "lib": ["dom es2015"]
 }

@@ -10,13 +10,10 @@ async function fetchNotes() {
 
 function addNoteToBoard(note) {
     const canvas = document.createElement('canvas');
-    // div.className = 'note';
-    // div.textContent = note.text;
     canvas.width = 400;
     canvas.height = 400;
     canvas.dataset.id = note._id;
     canvas.setAttribute('name', note._id);
-    // div.onclick = () => socket.emit('deleteNote', note._id);
     board.appendChild(canvas);
     setBurn(note._id);
 }

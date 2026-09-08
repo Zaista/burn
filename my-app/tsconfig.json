@@ -5,7 +5,7 @@
     "esModuleInterop": true,
     "target": "es2017",
     "moduleResolution": "node",
-    "types": ["node", "express"],
+    "types": ["node", "express", "vite/client"],
     "sourceMap": true,
     "outDir": "./dist",
     "rootDir": "./src"

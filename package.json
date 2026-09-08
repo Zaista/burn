@@ -20,7 +20,9 @@
     "run": "node dist/server.js",
     "dev": "npm-run-all --parallel run watch",
     "watch": "tsc --watch",
-    "prerun": "tsc"
+    "prerun": "tsc",
+    "frontend": "npm --prefix my-app run dev",
+    "dev:frontend": "npm-run-all --parallel run watch frontend"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
@@ -30,7 +32,7 @@
   "dependencies": {
     "cors": "2.8.5",
     "express": "5.1.0",
-    "mongoose": "8.16.1",
+    "mongoose": "8.24.4",
     "npm-run-all": "^4.1.5",
     "socket.io": "4.8.1"
   }

@@ -12,7 +12,6 @@ const io = new Server(server, {
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static('./public', { redirect: false }));
 
 // Connect to MongoDB
 await mongoose.connect('mongodb://appuser:apppass@localhost:27017/postit', { authSource: 'postit' });
@@ -31,11 +30,6 @@ const Note = mongoose.model('Note', NoteSchema);
 app.get('/notes', async (req, res) => {
     const notes = await Note.find();
     res.json(notes);
-});
-
-app.get('/', (req, res) => {
-    console.log('here')
-    res.sendFile('/index.html', { root: '.' });
 });
 
 // Socket.IO events

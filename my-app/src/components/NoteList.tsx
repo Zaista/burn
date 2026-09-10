@@ -51,10 +51,29 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
     const baseCanvas = document.createElement('canvas');
     baseCanvas.width = width;
     baseCanvas.height = height;
-    baseCanvas.getContext('2d')!.drawImage(canvas, 0, 0);
+    const baseCtx = baseCanvas.getContext('2d')!;
+    baseCtx.drawImage(canvas, 0, 0);
+
+    const idx = (x: number, y: number) => y * cols + x;
+    const cellCount = cols * rows;
+
+    // postit.png isn't a full square — it has transparent margins around the
+    // curled note shape. Without this, the CA would happily ignite (and
+    // render ash/char/flame circles for) cells that fall outside the visible
+    // paper entirely. Sample the base image's alpha at each cell's center so
+    // only cells actually on the note artwork can ever catch fire.
+    const ALPHA_THRESHOLD = 20;
+    const alphaData = baseCtx.getImageData(0, 0, width, height).data;
+    const visible = new Uint8Array(cellCount);
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const px = Math.min(width - 1, Math.floor((x + 0.5) * cellW));
+            const py = Math.min(height - 1, Math.floor((y + 0.5) * cellH));
+            visible[idx(x, y)] = alphaData[(py * width + px) * 4 + 3] > ALPHA_THRESHOLD ? 1 : 0;
+        }
+    }
 
     const STAGES = 9; // generations a cell stays actively burning before turning to ash
-    const cellCount = cols * rows;
     // 0 = unburnt, 1..STAGES = burning (counts down each generation), -1 = ash (punched through)
     const heat = new Int8Array(cellCount);
     // Static per-cell noise standing in for paper density/moisture — cells
@@ -77,14 +96,13 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
     const exposed = new Uint8Array(cellCount);
     const exposureAge = new Uint16Array(cellCount);
 
-    const idx = (x: number, y: number) => y * cols + x;
     const originX = (cols - 1) / 2;
     const originY = (rows - 1) / 2;
     for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
             const gx = Math.round(originX + dx);
             const gy = Math.round(originY + dy);
-            if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) heat[idx(gx, gy)] = STAGES;
+            if (gx >= 0 && gx < cols && gy >= 0 && gy < rows && visible[idx(gx, gy)]) heat[idx(gx, gy)] = STAGES;
         }
     }
 
@@ -109,6 +127,7 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
                     const nx = x + dx, ny = y + dy;
                     if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) return;
                     const j = idx(nx, ny);
+                    if (!visible[j]) return; // off the note's artwork — nothing to burn there
                     if (heat[j] !== 0) return; // already burning or ash
                     exposed[j] = 1; // touched by fire — starts its catch-up clock below
                     const diagonalPenalty = dx !== 0 && dy !== 0 ? 0.6 : 1;

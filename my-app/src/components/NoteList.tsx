@@ -363,6 +363,14 @@ const NoteList: React.FC = () => {
     // neither the template nor the real note occupies that spot, which
     // reads as the note flickering out and back in.
     const pendingSpawns = useRef<Map<string, { canvas: HTMLCanvasElement; slotX: number; slotY: number }>>(new Map());
+    // A shared, ever-increasing counter: whichever note was grabbed most
+    // recently — by this client or, via note_dragging, another one — gets
+    // the highest z-index and stays on top, like the last sticky note you
+    // touched on a real desk.
+    const zCounter = useRef(1);
+    const bringToFront = (canvas: HTMLCanvasElement) => {
+        canvas.style.zIndex = String(++zCounter.current);
+    };
     const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
 
@@ -480,6 +488,7 @@ const NoteList: React.FC = () => {
             if (canvas) {
                 canvas.style.left = `${x}px`;
                 canvas.style.top = `${y}px`;
+                bringToFront(canvas); // another client just grabbed/moved this one — keep the "last touched" ordering in sync
             }
         };
         const onMoved = ({ id, x, y }: { id: string; x: number; y: number }) => setNotePosition(id, x, y);
@@ -526,6 +535,7 @@ const NoteList: React.FC = () => {
 
             canvas.onpointerdown = (e) => {
                 canvas.setPointerCapture(e.pointerId);
+                bringToFront(canvas);
                 dragged = false;
                 dragOrigin = { pointerX: e.clientX, pointerY: e.clientY };
             };
@@ -628,6 +638,7 @@ const NoteList: React.FC = () => {
 
             canvas.onpointerdown = (e) => {
                 canvas.setPointerCapture(e.pointerId);
+                bringToFront(canvas);
                 dragged = false;
                 dragOrigin = {
                     pointerX: e.clientX,

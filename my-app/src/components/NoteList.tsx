@@ -583,7 +583,7 @@ const NoteList: React.FC = () => {
             if (settled) return;
             settled = true;
             textarea.remove();
-            const text = textarea.value;
+            const text = textarea.value.replace(/\s+$/, ''); // trailing newlines (e.g. from Enter before blurring) shouldn't be saved
             if (text !== originalText) {
                 setNoteText(id, text);
                 socket.emit('note_text_changed', { id, text });

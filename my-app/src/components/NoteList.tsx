@@ -188,6 +188,12 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
                 const py = (y + 0.5) * cellH;
 
                 if (h === -1) {
+                    // fillStyle must be fully opaque here — destination-out erases
+                    // by the fill's alpha, and this would otherwise inherit
+                    // whatever semi-transparent color a neighboring bright/char
+                    // cell last set, leaving a faint speckled "ghost" of paper
+                    // behind instead of a clean hole.
+                    ctx.fillStyle = '#000';
                     ctx.globalCompositeOperation = 'destination-out';
                     ctx.beginPath();
                     ctx.arc(px, py, cellRadius, 0, Math.PI * 2);

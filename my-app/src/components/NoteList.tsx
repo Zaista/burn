@@ -490,26 +490,47 @@ const NoteList: React.FC = () => {
         const originalText = notes?.find(n => n._id === id)?.text ?? '';
         const box = canvas.getBoundingClientRect();
 
+        const availableWidth = box.width - TEXT_PADDING * 2;
+        const availableHeight = box.height - TEXT_PADDING * 2;
+
         const textarea = document.createElement('textarea');
         textarea.value = originalText;
         Object.assign(textarea.style, {
             position: 'fixed',
             left: `${box.left + TEXT_PADDING}px`,
             top: `${box.top + TEXT_PADDING}px`,
-            width: `${box.width - TEXT_PADDING * 2}px`,
-            height: `${box.height - TEXT_PADDING * 2}px`,
+            width: `${availableWidth}px`,
+            height: `${availableHeight}px`,
             zIndex: String(++zCounter.current),
             border: 'none',
             outline: 'none',
             resize: 'none',
+            overflowY: 'hidden',
             background: 'transparent',
             textAlign: 'center',
             font: `${TEXT_MAX_FONT_SIZE}px ${TEXT_FONT_FAMILY}`,
             color: TEXT_COLOR,
+            boxSizing: 'border-box',
         });
         document.body.appendChild(textarea);
         textarea.focus();
         textarea.select();
+
+        // Textareas always start their text at the top with no built-in way
+        // to vertically center it — fake it with padding-top, sized to
+        // whatever's left above the current text block so it sits centered
+        // the same way the committed, canvas-rendered text does.
+        const measureCtx = canvas.getContext('2d');
+        const updateVerticalCentering = () => {
+            if (!measureCtx) return;
+            measureCtx.font = `${TEXT_MAX_FONT_SIZE}px ${TEXT_FONT_FAMILY}`;
+            const lines = wrapText(measureCtx, textarea.value || ' ', availableWidth);
+            const lineHeight = TEXT_MAX_FONT_SIZE * 1.25;
+            const topPad = Math.max(0, (availableHeight - lines.length * lineHeight) / 2);
+            textarea.style.paddingTop = `${topPad}px`;
+        };
+        updateVerticalCentering();
+        textarea.addEventListener('input', updateVerticalCentering);
 
         let settled = false;
         const commit = () => {

@@ -60,16 +60,28 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
     // postit.png isn't a full square — it has transparent margins around the
     // curled note shape. Without this, the CA would happily ignite (and
     // render ash/char/flame circles for) cells that fall outside the visible
-    // paper entirely. Sample the base image's alpha at each cell's center so
-    // only cells actually on the note artwork can ever catch fire.
+    // paper entirely. Sample the base image's alpha within each cell so only
+    // cells actually on the note artwork can ever catch fire.
     const ALPHA_THRESHOLD = 20;
     const alphaData = baseCtx.getImageData(0, 0, width, height).data;
+    const alphaAt = (px: number, py: number) =>
+        alphaData[(Math.min(height - 1, Math.max(0, py)) * width + Math.min(width - 1, Math.max(0, px))) * 4 + 3];
     const visible = new Uint8Array(cellCount);
     for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
-            const px = Math.min(width - 1, Math.floor((x + 0.5) * cellW));
-            const py = Math.min(height - 1, Math.floor((y + 0.5) * cellH));
-            visible[idx(x, y)] = alphaData[(py * width + px) * 4 + 3] > ALPHA_THRESHOLD ? 1 : 0;
+            // Sample the cell's center *and* its corners, not just the
+            // center — a cell straddling the artwork's edge can have its
+            // center land just outside the opaque area while still covering
+            // real paper pixels. Sampling only the center wrongly excludes
+            // that cell from ever burning, leaving a permanent sliver of
+            // unburned note along the artwork's true boundary.
+            const x0 = x * cellW, x1 = (x + 1) * cellW - 1;
+            const y0 = y * cellH, y1 = (y + 1) * cellH - 1;
+            const points: [number, number][] = [
+                [(x0 + x1) / 2, (y0 + y1) / 2],
+                [x0, y0], [x1, y0], [x0, y1], [x1, y1],
+            ];
+            visible[idx(x, y)] = points.some(([sx, sy]) => alphaAt(Math.floor(sx), Math.floor(sy)) > ALPHA_THRESHOLD) ? 1 : 0;
         }
     }
 
@@ -322,7 +334,18 @@ const NoteList: React.FC = () => {
             postit.src = postitUrl;
 
             postit.onload = () => {
+                // Canvas's shadow properties are computed from the actual
+                // alpha channel of what's drawn, not a bounding box — so
+                // this naturally follows the note's silhouette (including
+                // the curled-corner cutout) instead of casting a plain
+                // rectangular shadow.
+                ctx.save();
+                ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+                ctx.shadowBlur = 10;
+                ctx.shadowOffsetX = 0;
+                ctx.shadowOffsetY = 5;
                 ctx.drawImage(postit, 0, 0, canvas.width, canvas.height);
+                ctx.restore();
             };
 
             canvas.onclick = () => {

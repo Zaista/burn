@@ -15,11 +15,12 @@ const fetcher = (url: string) => fetch(url).then((res) => {
 });
 
 export function useNotes() {
-    const { data, error, isLoading } = useSWR<Note[]>('http://localhost:3000/notes', fetcher);
+    const { data, error, isLoading, mutate } = useSWR<Note[]>('http://localhost:3000/notes', fetcher);
 
     return {
         notes: data,
         isLoading,
         isError: error,
+        mutate,
     };
 }

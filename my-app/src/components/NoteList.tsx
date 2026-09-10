@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import { useNotes } from '../hooks/useNotes';
+import { useNotes, type Note } from '../hooks/useNotes';
 import SimplexNoise from './SimplexNoise';
 import { socket } from '../socket';
 import postitUrl from '../assets/postit.png';
@@ -131,7 +131,7 @@ const NoteList: React.FC = () => {
 
     const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
     const initializedIds = useRef<Set<string>>(new Set());
-    const { notes, isLoading, isError } = useNotes();
+    const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
 
     // Notes that have finished burning are dropped from the board entirely.
@@ -145,12 +145,23 @@ const NoteList: React.FC = () => {
         setBurnedIds(prev => new Set(prev).add(id));
     };
 
+    // The server broadcasts noteAdded to every client (including the one that
+    // created it) — drop it straight into the SWR cache instead of waiting on
+    // the next revalidation, so new notes show up instantly.
+    const addNote = (note: Note) => {
+        mutate(current => (current?.some(n => n._id === note._id) ? current : [...(current ?? []), note]), {
+            revalidate: false,
+        });
+    };
+
     // The server deletes the note and broadcasts noteDeleted to every client
     // (including this one) once it's gone — that's what actually drops it
     // from the board, whether it was burned here or in another tab.
     useEffect(() => {
+        socket.on('noteAdded', addNote);
         socket.on('noteDeleted', removeNote);
         return () => {
+            socket.off('noteAdded', addNote);
             socket.off('noteDeleted', removeNote);
         };
     }, []);

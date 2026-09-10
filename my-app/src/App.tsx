@@ -1,19 +1,28 @@
-import {useState} from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
+import { useState } from 'react'
 import './App.css'
-import React from 'react'
 import NoteList from './components/NoteList';
-import useSWR, { Fetcher } from 'swr'
-import {useNotes} from "./hooks/useNotes";
+import { socket } from './socket';
 
 function App() {
-    const [count, setCount] = useState(0)
+    const [text, setText] = useState('')
+
+    const addNote = () => {
+        socket.emit('addNote', text.trim())
+        setText('')
+    }
 
     return (
         <>
-            <input id="noteInput" placeholder="Type a note..."/>
-            {<button onClick={useNotes}>Add</button>}
+            <input
+                id="noteInput"
+                placeholder="Type a note..."
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter') addNote()
+                }}
+            />
+            <button onClick={addNote}>Add</button>
             <NoteList />
         </>
     )

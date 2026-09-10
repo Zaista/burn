@@ -76,6 +76,70 @@ function paintNote(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, onD
     };
 }
 
+const TEXT_MAX_FONT_SIZE = 22;
+const TEXT_MIN_FONT_SIZE = 10;
+const TEXT_PADDING = 24; // inset from the canvas edges the text has to fit within
+const TEXT_FONT_FAMILY = 'system-ui, sans-serif';
+const TEXT_COLOR = '#2b2418';
+
+// Greedy word-wrap: breaks `text` into lines no wider than maxWidth under
+// ctx's current font.
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+    const lines: string[] = [];
+    text.split('\n').forEach(paragraph => {
+        const words = paragraph.split(/\s+/).filter(Boolean);
+        if (words.length === 0) { lines.push(''); return; }
+        let line = '';
+        words.forEach(word => {
+            const candidate = line ? `${line} ${word}` : word;
+            if (line && ctx.measureText(candidate).width > maxWidth) {
+                lines.push(line);
+                line = word;
+            } else {
+                line = candidate;
+            }
+        });
+        lines.push(line);
+    });
+    return lines;
+}
+
+// Draws a note's text centered on the canvas, shrinking the font size (down
+// to TEXT_MIN_FONT_SIZE) until the wrapped text fits vertically — like Miro,
+// longer notes get smaller text instead of overflowing. Past that floor it
+// just wraps at the smallest size and may clip; that's the "certain limit".
+function drawNoteText(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, text: string) {
+    if (!text.trim()) return;
+    const maxWidth = canvas.width - TEXT_PADDING * 2;
+    const maxHeight = canvas.height - TEXT_PADDING * 2;
+
+    let fontSize = TEXT_MAX_FONT_SIZE;
+    let lines: string[] = [];
+    let lineHeight = fontSize * 1.25;
+    for (; fontSize >= TEXT_MIN_FONT_SIZE; fontSize--) {
+        ctx.font = `${fontSize}px ${TEXT_FONT_FAMILY}`;
+        lines = wrapText(ctx, text, maxWidth);
+        lineHeight = fontSize * 1.25;
+        if (lines.length * lineHeight <= maxHeight) break;
+    }
+
+    ctx.font = `${fontSize}px ${TEXT_FONT_FAMILY}`;
+    ctx.fillStyle = TEXT_COLOR;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+    lines.forEach((line, i) => ctx.fillText(line, canvas.width / 2, startY + i * lineHeight));
+}
+
+// Paints the full note — artwork plus its text — used everywhere a note
+// needs to be (re)drawn: initial mount and after an edit.
+function renderNote(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, text: string, onDone?: () => void) {
+    paintNote(ctx, canvas, () => {
+        drawNoteText(ctx, canvas, text);
+        onDone?.();
+    });
+}
+
 // Burns a hole outward from the note's center using a coarse cellular-
 // automaton grid instead of a single vector outline. Each cell independently
 // "catches" from an already-burning neighbor with some randomness (biased by
@@ -398,6 +462,77 @@ const NoteList: React.FC = () => {
         });
     };
 
+    // Redraws a note's canvas with new text and remembers it in the SWR
+    // cache — used both right after this client finishes editing and when
+    // another client's note_text_changed arrives.
+    const setNoteText = (id: string, text: string) => {
+        const canvas = canvasRefs.current[id];
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                renderNote(ctx, canvas, text);
+            }
+        }
+        mutate(current => current?.map(n => (n._id === id ? { ...n, text } : n)), {
+            revalidate: false,
+        });
+    };
+
+    // Double-click opens a plain <textarea> positioned exactly over the
+    // note — canvas has no native text editing, so this overlays a real
+    // input, then bakes the result back into the canvas (via setNoteText)
+    // once the user clicks away. Escape cancels without committing.
+    const startEditingNote = (id: string) => {
+        if (burningIds.current.has(id)) return;
+        const canvas = canvasRefs.current[id];
+        if (!canvas) return;
+        const originalText = notes?.find(n => n._id === id)?.text ?? '';
+        const box = canvas.getBoundingClientRect();
+
+        const textarea = document.createElement('textarea');
+        textarea.value = originalText;
+        Object.assign(textarea.style, {
+            position: 'fixed',
+            left: `${box.left + TEXT_PADDING}px`,
+            top: `${box.top + TEXT_PADDING}px`,
+            width: `${box.width - TEXT_PADDING * 2}px`,
+            height: `${box.height - TEXT_PADDING * 2}px`,
+            zIndex: String(++zCounter.current),
+            border: 'none',
+            outline: 'none',
+            resize: 'none',
+            background: 'transparent',
+            textAlign: 'center',
+            font: `${TEXT_MAX_FONT_SIZE}px ${TEXT_FONT_FAMILY}`,
+            color: TEXT_COLOR,
+        });
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+
+        let settled = false;
+        const commit = () => {
+            if (settled) return;
+            settled = true;
+            textarea.remove();
+            const text = textarea.value;
+            if (text !== originalText) {
+                setNoteText(id, text);
+                socket.emit('note_text_changed', { id, text });
+            }
+        };
+        const cancel = () => {
+            if (settled) return;
+            settled = true;
+            textarea.remove();
+        };
+        textarea.addEventListener('blur', commit);
+        textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') cancel();
+        });
+    };
+
     // Starts the burn animation for a note on THIS client. `broadcast: true`
     // (a local click) also tells every other client to start the same
     // animation on their own board via the startBurn socket event; a
@@ -492,17 +627,20 @@ const NoteList: React.FC = () => {
             }
         };
         const onMoved = ({ id, x, y }: { id: string; x: number; y: number }) => setNotePosition(id, x, y);
+        const onTextChanged = ({ id, text }: { id: string; text: string }) => setNoteText(id, text);
         socket.on('noteAdded', addNote);
         socket.on('noteDeleted', removeNote);
         socket.on('startBurn', onRemoteBurn);
         socket.on('note_dragging', onDragging);
         socket.on('note_moved', onMoved);
+        socket.on('note_text_changed', onTextChanged);
         return () => {
             socket.off('noteAdded', addNote);
             socket.off('noteDeleted', removeNote);
             socket.off('startBurn', onRemoteBurn);
             socket.off('note_dragging', onDragging);
             socket.off('note_moved', onMoved);
+            socket.off('note_text_changed', onTextChanged);
         };
     }, []);
 
@@ -623,11 +761,13 @@ const NoteList: React.FC = () => {
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            paintNote(ctx, canvas, () => {
+            renderNote(ctx, canvas, note.text ?? '', () => {
                 // Created directly on the coal — ignite now that the
                 // canvas actually has the note artwork painted on it.
                 if (igniteOnReady.current.delete(note._id)) triggerBurn(note._id, false);
             });
+
+            canvas.ondblclick = () => startEditingNote(note._id);
 
             // Pointer-based drag, distinguished from a click by movement
             // distance: a short move still counts as a click (burns the

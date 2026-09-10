@@ -3,6 +3,7 @@ import useSWR from 'swr';
 
 export type Note = {
     _id: string;
+    text: string;
     position: {
         x: number
         y: any

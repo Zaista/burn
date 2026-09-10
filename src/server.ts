@@ -76,6 +76,13 @@ io.on('connection', (socket) => {
         socket.broadcast.emit('note_moved', { id, x, y });
         // TODO save the position to MongoDB
     });
+
+    // A note's text was edited (double-click to edit on the client) — save
+    // it and let every other client redraw that note with the new text.
+    socket.on('note_text_changed', async ({ id, text }: { id: string; text: string }) => {
+        await Note.findByIdAndUpdate(id, { text });
+        socket.broadcast.emit('note_text_changed', { id, text });
+    });
 });
 
 const PORT = process.env.PORT || 3000;

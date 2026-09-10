@@ -34,8 +34,12 @@ app.get('/notes', async (req, res) => {
 
 // Socket.IO events
 io.on('connection', (socket) => {
-    socket.on('addNote', async (text) => {
-        const newNote = new Note({ text });
+    // `position` is set when a note is created by dragging it off the
+    // corner stack (its drop point) — omitted (or optional fields on the
+    // payload) leaves the note unpositioned, so the client falls back to
+    // rendering it in the legacy stack.
+    socket.on('addNote', async ({ text, position }: { text: string; position?: { x: number; y: number } }) => {
+        const newNote = new Note({ text, position });
         await newNote.save();
         io.emit('noteAdded', newNote);
     });

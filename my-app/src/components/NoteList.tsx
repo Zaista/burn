@@ -3,6 +3,10 @@ import { useNotes, type Note } from '../hooks/useNotes';
 import SimplexNoise from './SimplexNoise';
 import { socket } from '../socket';
 import postitUrl from '../assets/postit.png';
+import coalUrl from '../assets/coal.png';
+
+// Notes are 200x200 — a bit smaller reads as roughly 80% of that.
+const COAL_SIZE = 160;
 
 // Small pre-rendered glow used for every ember particle, so a frame only ever
 // needs a cheap drawImage() instead of building a radial gradient per-particle.
@@ -24,6 +28,53 @@ function getEmberSprite(): HTMLCanvasElement {
 }
 
 type Ember = { x: number; y: number; vx: number; vy: number; size: number; life: number; decay: number };
+
+// A note is "placed" once it has a saved x/y (from a previous drag, by
+// anyone). Until then it lives in the legacy fallback stack below.
+const isPlaced = (note: Note): boolean =>
+    typeof note.position?.x === 'number' && typeof note.position?.y === 'number';
+
+const STACK_OFFSET_STEP = 6; // fan spacing shared by both stacks below
+
+// The corner dispenser: a fixed, never-shrinking pile of blank notes. It
+// isn't backed by real documents — grabbing one just spawns a real note at
+// the drop point (see the dispenser effect further down) while the pile
+// itself snaps right back to DISPENSER_COUNT notes.
+const DISPENSER_ORIGIN = { x: 20, y: 20 };
+const DISPENSER_COUNT = 4;
+
+// Real notes created before the dispenser existed (or otherwise missing a
+// saved position) fall back to piling up here instead, offset below the
+// dispenser so the two stacks don't visually merge.
+const LEGACY_STACK_ORIGIN = { x: 20, y: 20 + 200 + DISPENSER_COUNT * STACK_OFFSET_STEP + 20 };
+
+// A pointer move shorter than this still counts as a click (burns the
+// note, or is ignored on a dispenser note) rather than a drag — otherwise a
+// hand that isn't perfectly still while clicking would accidentally start
+// dragging.
+const DRAG_THRESHOLD = 4;
+
+// Draws the note artwork (with its alpha-aware drop shadow) onto a canvas.
+// Shared by real notes and the dispenser's template notes, which need to
+// look identical.
+function paintNote(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, onDone?: () => void) {
+    const postit = new Image();
+    postit.src = postitUrl;
+    postit.onload = () => {
+        // Canvas's shadow properties are computed from the actual alpha
+        // channel of what's drawn, not a bounding box — so this naturally
+        // follows the note's silhouette (including the curled-corner
+        // cutout) instead of casting a plain rectangular shadow.
+        ctx.save();
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+        ctx.shadowBlur = 10;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 5;
+        ctx.drawImage(postit, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+        onDone?.();
+    };
+}
 
 // Burns a hole outward from the note's center using a coarse cellular-
 // automaton grid instead of a single vector outline. Each cell independently
@@ -276,8 +327,24 @@ const NoteList: React.FC = () => {
     const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
     const initializedIds = useRef<Set<string>>(new Set());
     const burningIds = useRef<Set<string>>(new Set());
+    const stackSlots = useRef(0);
+    const dispenserRefs = useRef<(HTMLCanvasElement | null)[]>([]);
     const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
+
+    // Moves a note's canvas to an absolute screen position, and remembers it
+    // in the SWR cache so a later re-render (or a page you didn't drag on)
+    // doesn't put it back in the stack.
+    const setNotePosition = (id: string, x: number, y: number) => {
+        const canvas = canvasRefs.current[id];
+        if (canvas) {
+            canvas.style.left = `${x}px`;
+            canvas.style.top = `${y}px`;
+        }
+        mutate(current => current?.map(n => (n._id === id ? { ...n, position: { x, y } } : n)), {
+            revalidate: false,
+        });
+    };
 
     // Starts the burn animation for a note on THIS client. `broadcast: true`
     // (a local click) also tells every other client to start the same
@@ -327,14 +394,91 @@ const NoteList: React.FC = () => {
     // from the board, whether it was burned here or in another tab.
     useEffect(() => {
         const onRemoteBurn = (id: string) => triggerBurn(id, false);
+        // Live position updates from another client dragging a note (no DB
+        // write yet — see note_dragging on the server) and the final
+        // position once they let go. Only moves the canvas on THIS client;
+        // the dragging client already moved its own via setNotePosition.
+        const onDragging = ({ id, x, y }: { id: string; x: number; y: number }) => {
+            const canvas = canvasRefs.current[id];
+            if (canvas) {
+                canvas.style.left = `${x}px`;
+                canvas.style.top = `${y}px`;
+            }
+        };
+        const onMoved = ({ id, x, y }: { id: string; x: number; y: number }) => setNotePosition(id, x, y);
         socket.on('noteAdded', addNote);
         socket.on('noteDeleted', removeNote);
         socket.on('startBurn', onRemoteBurn);
+        socket.on('note_dragging', onDragging);
+        socket.on('note_moved', onMoved);
         return () => {
             socket.off('noteAdded', addNote);
             socket.off('noteDeleted', removeNote);
             socket.off('startBurn', onRemoteBurn);
+            socket.off('note_dragging', onDragging);
+            socket.off('note_moved', onMoved);
         };
+    }, []);
+
+    // The corner dispenser: DISPENSER_COUNT template notes that are never
+    // spent. Dragging one off spawns a real note at the drop point (via
+    // addNote's position, so it's already "placed" the moment it arrives —
+    // see paintNote/isPlaced above) while the template itself snaps back to
+    // its slot, ready to be grabbed again. Runs once — the dispenser has
+    // nothing to do with which real notes exist.
+    useEffect(() => {
+        for (let i = 0; i < DISPENSER_COUNT; i++) {
+            const canvas = dispenserRefs.current[i];
+            if (!canvas) continue;
+            canvas.width = 200;
+            canvas.height = 200;
+            canvas.style.position = 'fixed';
+            canvas.style.touchAction = 'none';
+
+            const slotX = DISPENSER_ORIGIN.x + i * STACK_OFFSET_STEP;
+            const slotY = DISPENSER_ORIGIN.y + i * STACK_OFFSET_STEP;
+            canvas.style.left = `${slotX}px`;
+            canvas.style.top = `${slotY}px`;
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) continue;
+            paintNote(ctx, canvas);
+
+            let dragOrigin: { pointerX: number; pointerY: number } | null = null;
+            let dragged = false;
+
+            canvas.onpointerdown = (e) => {
+                canvas.setPointerCapture(e.pointerId);
+                dragged = false;
+                dragOrigin = { pointerX: e.clientX, pointerY: e.clientY };
+            };
+
+            canvas.onpointermove = (e) => {
+                if (!dragOrigin) return;
+                const dx = e.clientX - dragOrigin.pointerX;
+                const dy = e.clientY - dragOrigin.pointerY;
+                if (!dragged && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                dragged = true;
+                canvas.style.left = `${slotX + dx}px`;
+                canvas.style.top = `${slotY + dy}px`;
+            };
+
+            canvas.onpointerup = (e) => {
+                canvas.releasePointerCapture(e.pointerId);
+                const wasDragged = dragged;
+                const dropX = parseFloat(canvas.style.left) || slotX;
+                const dropY = parseFloat(canvas.style.top) || slotY;
+                dragOrigin = null;
+                dragged = false;
+                // Snap back to the slot regardless — the dispenser is
+                // infinite, grabbing one doesn't shrink the pile.
+                canvas.style.left = `${slotX}px`;
+                canvas.style.top = `${slotY}px`;
+                if (wasDragged) {
+                    socket.emit('addNote', { text: '', position: { x: dropX, y: dropY } });
+                }
+            };
+        }
     }, []);
 
     useEffect(() => {
@@ -351,48 +495,112 @@ const NoteList: React.FC = () => {
             canvas.dataset.id = note._id;
             canvas.setAttribute('name', note._id);
 
+            // Freely draggable anywhere on the screen — placed notes render
+            // at their saved position, everything else piles up in the
+            // corner stack until someone drags it out.
+            canvas.style.position = 'fixed';
+            canvas.style.touchAction = 'none'; // don't let touch-scroll fight the drag
+            if (isPlaced(note)) {
+                canvas.style.left = `${note.position.x}px`;
+                canvas.style.top = `${note.position.y}px`;
+            } else {
+                // Legacy fallback — new notes always come from the
+                // dispenser with a position already set, so this only
+                // applies to notes created before the dispenser existed.
+                const slot = stackSlots.current++;
+                canvas.style.left = `${LEGACY_STACK_ORIGIN.x + slot * STACK_OFFSET_STEP}px`;
+                canvas.style.top = `${LEGACY_STACK_ORIGIN.y + slot * STACK_OFFSET_STEP}px`;
+            }
+
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            paintNote(ctx, canvas);
 
-            const postit = new Image();
-            postit.src = postitUrl;
+            // Pointer-based drag, distinguished from a click by movement
+            // distance: a short move still counts as a click (burns the
+            // note); crossing DRAG_THRESHOLD switches to dragging it around
+            // and suppresses the burn on release.
+            let dragOrigin: { pointerX: number; pointerY: number; startLeft: number; startTop: number } | null = null;
+            let dragged = false;
 
-            postit.onload = () => {
-                // Canvas's shadow properties are computed from the actual
-                // alpha channel of what's drawn, not a bounding box — so
-                // this naturally follows the note's silhouette (including
-                // the curled-corner cutout) instead of casting a plain
-                // rectangular shadow.
-                ctx.save();
-                ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
-                ctx.shadowBlur = 10;
-                ctx.shadowOffsetX = 0;
-                ctx.shadowOffsetY = 5;
-                ctx.drawImage(postit, 0, 0, canvas.width, canvas.height);
-                ctx.restore();
+            canvas.onpointerdown = (e) => {
+                canvas.setPointerCapture(e.pointerId);
+                dragged = false;
+                dragOrigin = {
+                    pointerX: e.clientX,
+                    pointerY: e.clientY,
+                    startLeft: parseFloat(canvas.style.left) || 0,
+                    startTop: parseFloat(canvas.style.top) || 0,
+                };
             };
 
-            canvas.onclick = () => triggerBurn(note._id, true);
+            canvas.onpointermove = (e) => {
+                if (!dragOrigin) return;
+                const dx = e.clientX - dragOrigin.pointerX;
+                const dy = e.clientY - dragOrigin.pointerY;
+                if (!dragged && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                dragged = true;
+                const x = dragOrigin.startLeft + dx;
+                const y = dragOrigin.startTop + dy;
+                canvas.style.left = `${x}px`;
+                canvas.style.top = `${y}px`;
+                // Live position only — no DB write here, too frequent (see server).
+                socket.emit('note_dragging', { id: note._id, x, y });
+            };
+
+            canvas.onpointerup = (e) => {
+                canvas.releasePointerCapture(e.pointerId);
+                const wasDragged = dragged;
+                dragOrigin = null;
+                dragged = false;
+                if (wasDragged) {
+                    const x = parseFloat(canvas.style.left) || 0;
+                    const y = parseFloat(canvas.style.top) || 0;
+                    socket.emit('note_drag_end', { id: note._id, x, y });
+                    setNotePosition(note._id, x, y);
+                } else {
+                    triggerBurn(note._id, true);
+                }
+            };
         })
 
     }, [visibleNotes]);
 
 
 
-    if (isLoading) return <p>Loading...</p>;
-    if (isError) return <p style={{ color: 'red' }}>Failed to load notes</p>;
-
-    // return <canvas ref={canvasRef} />;
-
     const setCanvasRef = (id: string) => (el: HTMLCanvasElement | null): void => {
         if (el) canvasRefs.current[id] = el;
         else delete canvasRefs.current[id];
     };
 
+    // The dispenser canvases must always render, even while notes are still
+    // loading — the dispenser-setup effect above has an empty dependency
+    // array (it only runs once), so if these were behind the isLoading/
+    // isError early returns like before, they wouldn't exist yet on the
+    // render that effect fires after, and the dispenser would never get
+    // wired up at all.
     return (
         <div>
-            {visibleNotes.map((note) => (
+            <img
+                src={coalUrl}
+                alt=""
+                style={{
+                    position: 'fixed',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    width: COAL_SIZE,
+                    height: COAL_SIZE,
+                    pointerEvents: 'none', // sits under draggable notes without blocking them
+                }}
+            />
+            {Array.from({ length: DISPENSER_COUNT }, (_, i) => (
+                <canvas key={`dispenser-${i}`} ref={(el) => { dispenserRefs.current[i] = el; }} />
+            ))}
+            {isLoading && <p>Loading...</p>}
+            {isError && <p style={{ color: 'red' }}>Failed to load notes</p>}
+            {!isLoading && !isError && visibleNotes.map((note) => (
                 <canvas key={note._id} id={note._id} ref={setCanvasRef(String(note._id))} />
             ))}
         </div>

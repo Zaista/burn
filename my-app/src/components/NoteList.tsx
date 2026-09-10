@@ -356,6 +356,13 @@ const NoteList: React.FC = () => {
     // itself, since starting the burn any earlier would snapshot a blank
     // canvas as the "pristine" note.
     const igniteOnReady = useRef<Set<string>>(new Set());
+    // Grabs from the dispenser that are waiting on their real note to come
+    // back from the server, keyed by a token unique to that grab. Until
+    // then the template canvas stays at the drop point instead of snapping
+    // back — otherwise there's a gap (a server round trip wide) where
+    // neither the template nor the real note occupies that spot, which
+    // reads as the note flickering out and back in.
+    const pendingSpawns = useRef<Map<string, { canvas: HTMLCanvasElement; slotX: number; slotY: number }>>(new Map());
     const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
 
@@ -442,8 +449,18 @@ const NoteList: React.FC = () => {
     // that here (synchronously, via a ref — no race with the re-render this
     // triggers) so the per-note init effect can start burning it the moment
     // its canvas is actually painted.
-    const addNote = (note: Note & { ignite?: boolean }) => {
+    const addNote = (note: Note & { ignite?: boolean; clientToken?: string }) => {
         if (note.ignite) igniteOnReady.current.add(note._id);
+        // The real note has arrived — now it's safe to send the dispenser
+        // template that spawned it back to its slot without a visible gap.
+        if (note.clientToken) {
+            const pending = pendingSpawns.current.get(note.clientToken);
+            if (pending) {
+                pending.canvas.style.left = `${pending.slotX}px`;
+                pending.canvas.style.top = `${pending.slotY}px`;
+                pendingSpawns.current.delete(note.clientToken);
+            }
+        }
         mutate(current => (current?.some(n => n._id === note._id) ? current : [...(current ?? []), note]), {
             revalidate: false,
         });
@@ -530,17 +547,34 @@ const NoteList: React.FC = () => {
                 const dropY = parseFloat(canvas.style.top) || slotY;
                 dragOrigin = null;
                 dragged = false;
-                // Snap back to the slot regardless — the dispenser is
-                // infinite, grabbing one doesn't shrink the pile.
-                canvas.style.left = `${slotX}px`;
-                canvas.style.top = `${slotY}px`;
-                if (wasDragged) {
-                    socket.emit('addNote', {
-                        text: '',
-                        position: { x: dropX, y: dropY },
-                        ignite: isOverCoal(dropX, dropY),
-                    });
+                if (!wasDragged) {
+                    canvas.style.left = `${slotX}px`;
+                    canvas.style.top = `${slotY}px`;
+                    return;
                 }
+                // Stay at the drop point — don't snap back to the slot yet.
+                // The dispenser is infinite (grabbing one doesn't shrink the
+                // pile), but resetting immediately would leave a gap where
+                // neither this template nor the real note (still in flight
+                // to the server) occupies the drop spot, which reads as a
+                // flicker. addNote's matching noteAdded snaps it back once
+                // the real note is actually ready to take over.
+                const token = `${Date.now()}-${Math.random()}`;
+                pendingSpawns.current.set(token, { canvas, slotX, slotY });
+                // Safety net: if a response never arrives (dropped
+                // connection, server error), don't leave the template
+                // stranded off its slot forever.
+                setTimeout(() => {
+                    if (!pendingSpawns.current.delete(token)) return;
+                    canvas.style.left = `${slotX}px`;
+                    canvas.style.top = `${slotY}px`;
+                }, 4000);
+                socket.emit('addNote', {
+                    text: '',
+                    position: { x: dropX, y: dropY },
+                    ignite: isOverCoal(dropX, dropY),
+                    clientToken: token,
+                });
             };
         }
     }, []);

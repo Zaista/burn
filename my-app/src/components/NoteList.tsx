@@ -54,13 +54,29 @@ const LEGACY_STACK_ORIGIN = { x: 20, y: 20 + 200 + DISPENSER_COUNT * STACK_OFFSE
 // dragging.
 const DRAG_THRESHOLD = 4;
 
+// Loaded once and reused for every note — was a fresh `new Image()` per
+// paintNote() call, so rapid successive redraws (e.g. live-typing sync
+// firing on every keystroke) could each wait on their own onload and finish
+// out of order, letting a stale call's text land on top of a newer one.
+// Drawing synchronously once this is loaded removes that async gap.
+let postitImage: HTMLImageElement | null = null;
+function withPostitImage(onReady: (img: HTMLImageElement) => void) {
+    if (postitImage && postitImage.complete) {
+        onReady(postitImage);
+        return;
+    }
+    if (!postitImage) {
+        postitImage = new Image();
+        postitImage.src = postitUrl;
+    }
+    postitImage.addEventListener('load', () => onReady(postitImage!), { once: true });
+}
+
 // Draws the note artwork (with its alpha-aware drop shadow) onto a canvas.
 // Shared by real notes and the dispenser's template notes, which need to
 // look identical.
 function paintNote(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, onDone?: () => void) {
-    const postit = new Image();
-    postit.src = postitUrl;
-    postit.onload = () => {
+    withPostitImage((postit) => {
         // Canvas's shadow properties are computed from the actual alpha
         // channel of what's drawn, not a bounding box — so this naturally
         // follows the note's silhouette (including the curled-corner
@@ -73,7 +89,7 @@ function paintNote(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, onD
         ctx.drawImage(postit, 0, 0, canvas.width, canvas.height);
         ctx.restore();
         onDone?.();
-    };
+    });
 }
 
 const TEXT_MAX_FONT_SIZE = 22;
@@ -437,6 +453,15 @@ const NoteList: React.FC = () => {
     };
     const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
+    // Handlers assigned inside the per-note init effect only run once per
+    // note (it's guarded so re-renders don't reset an in-progress burn),
+    // which freezes their closures to whatever `notes` was on that first
+    // render. Reading through this ref instead — kept in sync on every
+    // render — avoids acting on a stale snapshot from when the note first
+    // mounted (e.g. re-opening the editor would otherwise always show the
+    // note's original, blank text instead of whatever it currently says).
+    const notesRef = useRef<Note[] | undefined>(notes);
+    notesRef.current = notes;
 
     // Whether a note dropped with its top-left at (x, y) — it's always
     // 200x200 — overlaps the coal image, i.e. it's been "placed on the
@@ -487,7 +512,7 @@ const NoteList: React.FC = () => {
         if (burningIds.current.has(id)) return;
         const canvas = canvasRefs.current[id];
         if (!canvas) return;
-        const originalText = notes?.find(n => n._id === id)?.text ?? '';
+        const originalText = notesRef.current?.find(n => n._id === id)?.text ?? '';
         const box = canvas.getBoundingClientRect();
 
         const availableWidth = box.width - TEXT_PADDING * 2;
@@ -512,6 +537,21 @@ const NoteList: React.FC = () => {
             color: TEXT_COLOR,
             boxSizing: 'border-box',
         });
+        // The textarea's background is transparent (so the note's texture/
+        // shadow still shows through while editing) — but that means the
+        // canvas underneath is still visible too, and it still has the OLD
+        // text baked into its pixels until a commit redraws it. Blank the
+        // text out for the duration of the edit so it doesn't show through
+        // and visually overlap what's being typed on top of it.
+        const redrawCanvasText = (text: string) => {
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (text) renderNote(ctx, canvas, text);
+            else paintNote(ctx, canvas);
+        };
+        redrawCanvasText('');
+
         document.body.appendChild(textarea);
         textarea.focus();
         textarea.select();
@@ -547,12 +587,15 @@ const NoteList: React.FC = () => {
             if (text !== originalText) {
                 setNoteText(id, text);
                 socket.emit('note_text_changed', { id, text });
+            } else {
+                redrawCanvasText(originalText); // nothing changed — just restore what editing blanked out
             }
         };
         const cancel = () => {
             if (settled) return;
             settled = true;
             textarea.remove();
+            redrawCanvasText(originalText);
         };
         textarea.addEventListener('blur', commit);
         textarea.addEventListener('keydown', (e) => {

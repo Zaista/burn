@@ -330,6 +330,11 @@ const NoteList: React.FC = () => {
     const stackSlots = useRef(0);
     const dispenserRefs = useRef<(HTMLCanvasElement | null)[]>([]);
     const coalRef = useRef<HTMLImageElement | null>(null);
+    // Ids of notes that arrived with an `ignite` flag (created directly on
+    // the coal) — consumed once that note's canvas has actually painted
+    // itself, since starting the burn any earlier would snapshot a blank
+    // canvas as the "pristine" note.
+    const igniteOnReady = useRef<Set<string>>(new Set());
     const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
 
@@ -393,8 +398,13 @@ const NoteList: React.FC = () => {
 
     // The server broadcasts noteAdded to every client (including the one that
     // created it) — drop it straight into the SWR cache instead of waiting on
-    // the next revalidation, so new notes show up instantly.
-    const addNote = (note: Note) => {
+    // the next revalidation, so new notes show up instantly. A note created
+    // directly on the coal carries `ignite: true`; every client records
+    // that here (synchronously, via a ref — no race with the re-render this
+    // triggers) so the per-note init effect can start burning it the moment
+    // its canvas is actually painted.
+    const addNote = (note: Note & { ignite?: boolean }) => {
+        if (note.ignite) igniteOnReady.current.add(note._id);
         mutate(current => (current?.some(n => n._id === note._id) ? current : [...(current ?? []), note]), {
             revalidate: false,
         });
@@ -486,7 +496,11 @@ const NoteList: React.FC = () => {
                 canvas.style.left = `${slotX}px`;
                 canvas.style.top = `${slotY}px`;
                 if (wasDragged) {
-                    socket.emit('addNote', { text: '', position: { x: dropX, y: dropY } });
+                    socket.emit('addNote', {
+                        text: '',
+                        position: { x: dropX, y: dropY },
+                        ignite: isOverCoal(dropX, dropY),
+                    });
                 }
             };
         }
@@ -526,7 +540,11 @@ const NoteList: React.FC = () => {
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            paintNote(ctx, canvas);
+            paintNote(ctx, canvas, () => {
+                // Created directly on the coal — ignite now that the
+                // canvas actually has the note artwork painted on it.
+                if (igniteOnReady.current.delete(note._id)) triggerBurn(note._id, false);
+            });
 
             // Pointer-based drag, distinguished from a click by movement
             // distance: a short move still counts as a click (burns the

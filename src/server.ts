@@ -37,11 +37,14 @@ io.on('connection', (socket) => {
     // `position` is set when a note is created by dragging it off the
     // corner stack (its drop point) — omitted (or optional fields on the
     // payload) leaves the note unpositioned, so the client falls back to
-    // rendering it in the legacy stack.
-    socket.on('addNote', async ({ text, position }: { text: string; position?: { x: number; y: number } }) => {
+    // rendering it in the legacy stack. `ignite` is set when that drop
+    // point was directly on the coal — it isn't persisted (not a real Note
+    // field), just relayed to every client so they can all start the burn
+    // the moment the note arrives, instead of leaving it sitting there.
+    socket.on('addNote', async ({ text, position, ignite }: { text: string; position?: { x: number; y: number }; ignite?: boolean }) => {
         const newNote = new Note({ text, position });
         await newNote.save();
-        io.emit('noteAdded', newNote);
+        io.emit('noteAdded', { _id: newNote._id, text: newNote.text, position: newNote.position, ignite: !!ignite });
     });
 
     socket.on('deleteNote', async (id) => {

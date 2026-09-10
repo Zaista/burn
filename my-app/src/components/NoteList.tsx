@@ -275,8 +275,32 @@ const NoteList: React.FC = () => {
 
     const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
     const initializedIds = useRef<Set<string>>(new Set());
+    const burningIds = useRef<Set<string>>(new Set());
     const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
+
+    // Starts the burn animation for a note on THIS client. `broadcast: true`
+    // (a local click) also tells every other client to start the same
+    // animation on their own board via the startBurn socket event; a
+    // broadcast we received from another client just plays it here without
+    // re-broadcasting. The guard against already-burning ids also prevents
+    // a stray double click from stacking two independent burn simulations
+    // on the same canvas.
+    const triggerBurn = (id: string, broadcast: boolean) => {
+        if (burningIds.current.has(id)) return;
+        const canvas = canvasRefs.current[id];
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        burningIds.current.add(id);
+        if (broadcast) socket.emit('startBurn', id);
+        // Once the animation finishes, tell the server the note is gone for
+        // real; its noteDeleted broadcast is what drops the canvas from the
+        // page (on every client, whichever one of them burned it).
+        startBurn(canvas, ctx, new SimplexNoise(), () => {
+            socket.emit('deleteNote', id);
+        });
+    };
 
     // Notes that have finished burning are dropped from the board entirely.
     const visibleNotes = useMemo(
@@ -302,11 +326,14 @@ const NoteList: React.FC = () => {
     // (including this one) once it's gone — that's what actually drops it
     // from the board, whether it was burned here or in another tab.
     useEffect(() => {
+        const onRemoteBurn = (id: string) => triggerBurn(id, false);
         socket.on('noteAdded', addNote);
         socket.on('noteDeleted', removeNote);
+        socket.on('startBurn', onRemoteBurn);
         return () => {
             socket.off('noteAdded', addNote);
             socket.off('noteDeleted', removeNote);
+            socket.off('startBurn', onRemoteBurn);
         };
     }, []);
 
@@ -328,8 +355,6 @@ const NoteList: React.FC = () => {
             if (!ctx) return;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            const simplex = new SimplexNoise();
-
             const postit = new Image();
             postit.src = postitUrl;
 
@@ -348,14 +373,7 @@ const NoteList: React.FC = () => {
                 ctx.restore();
             };
 
-            canvas.onclick = () => {
-                // Once the animation finishes, tell the server the note is
-                // gone for real; its noteDeleted broadcast (above) is what
-                // drops the canvas from the page.
-                startBurn(canvas, ctx, simplex, () => {
-                    socket.emit('deleteNote', note._id);
-                });
-            }
+            canvas.onclick = () => triggerBurn(note._id, true);
         })
 
     }, [visibleNotes]);

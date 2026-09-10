@@ -45,6 +45,16 @@ io.on('connection', (socket) => {
         io.emit('noteDeleted', id);
     });
 
+    // Relay a burn-start to every other client so the fire animation plays
+    // on every board, not just the tab that clicked the note. Each client
+    // simulates the burn locally (it's randomized, so it won't be pixel-
+    // identical everywhere) — actual removal still goes through the
+    // existing deleteNote/noteDeleted round trip once a client's local
+    // animation finishes.
+    socket.on('startBurn', (id) => {
+        socket.broadcast.emit('startBurn', id);
+    });
+
     // Live update while dragging (don’t write to DB here — too frequent)
     socket.on('note_dragging', ({ id, x, y }) => {
         socket.broadcast.emit('note_dragging', { id, x, y });

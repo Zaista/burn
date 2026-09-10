@@ -637,6 +637,7 @@ const NoteList: React.FC = () => {
             let dragged = false;
 
             canvas.onpointerdown = (e) => {
+                if (burningIds.current.has(note._id)) return; // already on fire — leave it be
                 canvas.setPointerCapture(e.pointerId);
                 bringToFront(canvas);
                 dragged = false;

@@ -1,8 +1,12 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import { useNotes } from '../hooks/useNotes';
+import { useNotes, type Note } from '../hooks/useNotes';
 import SimplexNoise from './SimplexNoise';
 import { socket } from '../socket';
 import postitUrl from '../assets/postit.png';
+import coalUrl from '../assets/coal.png';
+
+// Notes are 200x200 — a bit smaller reads as roughly 80% of that.
+const COAL_SIZE = 160;
 
 // Small pre-rendered glow used for every ember particle, so a frame only ever
 // needs a cheap drawImage() instead of building a radial gradient per-particle.
@@ -25,81 +29,373 @@ function getEmberSprite(): HTMLCanvasElement {
 
 type Ember = { x: number; y: number; vx: number; vy: number; size: number; life: number; decay: number };
 
-// Burns a hole outward from the note's center. Instead of scanning every pixel
-// each frame (the old approach), it traces a noise-jittered polygon for the
-// burning edge and erases with it — cheap canvas path fills instead of a
-// per-pixel loop — then layers a charred rim, a bright ember line, and a
-// handful of drifting ember particles on top.
-function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, simplex: SimplexNoise, onComplete?: () => void) {
-    const cx = canvas.width / 2;
-    const cy = canvas.height / 2;
-    const maxRadius = Math.hypot(cx, cy) + 12;
-    const duration = 1300; // ms — burns at the same speed regardless of frame rate
+// A note is "placed" once it has a saved x/y (from a previous drag, by
+// anyone). Until then it lives in the legacy fallback stack below.
+const isPlaced = (note: Note): boolean =>
+    typeof note.position?.x === 'number' && typeof note.position?.y === 'number';
+
+const STACK_OFFSET_STEP = 6; // fan spacing shared by both stacks below
+
+// The corner dispenser: a fixed, never-shrinking pile of blank notes. It
+// isn't backed by real documents — grabbing one just spawns a real note at
+// the drop point (see the dispenser effect further down) while the pile
+// itself snaps right back to DISPENSER_COUNT notes.
+const DISPENSER_ORIGIN = { x: 20, y: 20 };
+const DISPENSER_COUNT = 4;
+
+// Real notes created before the dispenser existed (or otherwise missing a
+// saved position) fall back to piling up here instead, offset below the
+// dispenser so the two stacks don't visually merge.
+const LEGACY_STACK_ORIGIN = { x: 20, y: 20 + 200 + DISPENSER_COUNT * STACK_OFFSET_STEP + 20 };
+
+// A pointer move shorter than this still counts as a click (burns the
+// note, or is ignored on a dispenser note) rather than a drag — otherwise a
+// hand that isn't perfectly still while clicking would accidentally start
+// dragging.
+const DRAG_THRESHOLD = 4;
+
+// Loaded once and reused for every note — was a fresh `new Image()` per
+// paintNote() call, so rapid successive redraws (e.g. live-typing sync
+// firing on every keystroke) could each wait on their own onload and finish
+// out of order, letting a stale call's text land on top of a newer one.
+// Drawing synchronously once this is loaded removes that async gap.
+let postitImage: HTMLImageElement | null = null;
+function withPostitImage(onReady: (img: HTMLImageElement) => void) {
+    if (postitImage && postitImage.complete) {
+        onReady(postitImage);
+        return;
+    }
+    if (!postitImage) {
+        postitImage = new Image();
+        postitImage.src = postitUrl;
+    }
+    postitImage.addEventListener('load', () => onReady(postitImage!), { once: true });
+}
+
+// Draws the note artwork (with its alpha-aware drop shadow) onto a canvas.
+// Shared by real notes and the dispenser's template notes, which need to
+// look identical.
+function paintNote(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, onDone?: () => void) {
+    withPostitImage((postit) => {
+        // Canvas's shadow properties are computed from the actual alpha
+        // channel of what's drawn, not a bounding box — so this naturally
+        // follows the note's silhouette (including the curled-corner
+        // cutout) instead of casting a plain rectangular shadow.
+        ctx.save();
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+        ctx.shadowBlur = 10;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 5;
+        ctx.drawImage(postit, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+        onDone?.();
+    });
+}
+
+const TEXT_MAX_FONT_SIZE = 22;
+const TEXT_MIN_FONT_SIZE = 10;
+const TEXT_PADDING = 24; // inset from the canvas edges the text has to fit within
+const TEXT_FONT_FAMILY = 'system-ui, sans-serif';
+const TEXT_COLOR = '#2b2418';
+
+// Greedy word-wrap: breaks `text` into lines no wider than maxWidth under
+// ctx's current font.
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+    const lines: string[] = [];
+    text.split('\n').forEach(paragraph => {
+        const words = paragraph.split(/\s+/).filter(Boolean);
+        if (words.length === 0) { lines.push(''); return; }
+        let line = '';
+        words.forEach(word => {
+            const candidate = line ? `${line} ${word}` : word;
+            if (line && ctx.measureText(candidate).width > maxWidth) {
+                lines.push(line);
+                line = word;
+            } else {
+                line = candidate;
+            }
+        });
+        lines.push(line);
+    });
+    return lines;
+}
+
+// Draws a note's text centered on the canvas, shrinking the font size (down
+// to TEXT_MIN_FONT_SIZE) until the wrapped text fits vertically — like Miro,
+// longer notes get smaller text instead of overflowing. Past that floor it
+// just wraps at the smallest size and may clip; that's the "certain limit".
+function drawNoteText(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, text: string) {
+    if (!text.trim()) return;
+    const maxWidth = canvas.width - TEXT_PADDING * 2;
+    const maxHeight = canvas.height - TEXT_PADDING * 2;
+
+    let fontSize = TEXT_MAX_FONT_SIZE;
+    let lines: string[] = [];
+    let lineHeight = fontSize * 1.25;
+    for (; fontSize >= TEXT_MIN_FONT_SIZE; fontSize--) {
+        ctx.font = `${fontSize}px ${TEXT_FONT_FAMILY}`;
+        lines = wrapText(ctx, text, maxWidth);
+        lineHeight = fontSize * 1.25;
+        if (lines.length * lineHeight <= maxHeight) break;
+    }
+
+    ctx.font = `${fontSize}px ${TEXT_FONT_FAMILY}`;
+    ctx.fillStyle = TEXT_COLOR;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+    lines.forEach((line, i) => ctx.fillText(line, canvas.width / 2, startY + i * lineHeight));
+}
+
+// Paints the full note — artwork plus its text — used everywhere a note
+// needs to be (re)drawn: initial mount and after an edit.
+function renderNote(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, text: string, onDone?: () => void) {
+    paintNote(ctx, canvas, () => {
+        drawNoteText(ctx, canvas, text);
+        onDone?.();
+    });
+}
+
+// Burns a hole outward from the note's center using a coarse cellular-
+// automaton grid instead of a single vector outline. Each cell independently
+// "catches" from an already-burning neighbor with some randomness (biased by
+// a static per-cell noise field standing in for paper density), so the fire
+// eats outward in uneven, organic fingers rather than a uniform ring. Every
+// burning cell then runs through a real flame color ramp — white-hot, then
+// orange, then a dark char — before turning to ash and disappearing. This is
+// the standard technique for a convincing "burning paper" look; a single
+// jittered outline (the previous approach) reads as a stylized wipe, not fire.
+function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, simplex: SimplexNoise, onComplete?: () => void, ignitionPoint?: { x: number; y: number }) {
+    const { width, height } = canvas;
+    const cellSize = 5;
+    const cols = Math.max(1, Math.round(width / cellSize));
+    const rows = Math.max(1, Math.round(height / cellSize));
+    const cellW = width / cols;
+    const cellH = height / rows;
+    // Cells are drawn as overlapping circles rather than a visible square
+    // grid, so adjacent cells blend into one continuous ragged shape.
+    const cellRadius = Math.max(cellW, cellH) * 0.8;
     const sprite = getEmberSprite();
+
+    // Snapshot the note's current artwork once so every frame can repaint
+    // this pristine base before compositing the burn state on top of it.
+    const baseCanvas = document.createElement('canvas');
+    baseCanvas.width = width;
+    baseCanvas.height = height;
+    const baseCtx = baseCanvas.getContext('2d')!;
+    baseCtx.drawImage(canvas, 0, 0);
+
+    const idx = (x: number, y: number) => y * cols + x;
+    const cellCount = cols * rows;
+
+    // postit.png isn't a full square — it has transparent margins around the
+    // curled note shape. Without this, the CA would happily ignite (and
+    // render ash/char/flame circles for) cells that fall outside the visible
+    // paper entirely. Sample the base image's alpha within each cell so only
+    // cells actually on the note artwork can ever catch fire.
+    const ALPHA_THRESHOLD = 20;
+    const alphaData = baseCtx.getImageData(0, 0, width, height).data;
+    const alphaAt = (px: number, py: number) =>
+        alphaData[(Math.min(height - 1, Math.max(0, py)) * width + Math.min(width - 1, Math.max(0, px))) * 4 + 3];
+    const visible = new Uint8Array(cellCount);
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            // Sample the cell's center *and* its corners, not just the
+            // center — a cell straddling the artwork's edge can have its
+            // center land just outside the opaque area while still covering
+            // real paper pixels. Sampling only the center wrongly excludes
+            // that cell from ever burning, leaving a permanent sliver of
+            // unburned note along the artwork's true boundary.
+            const x0 = x * cellW, x1 = (x + 1) * cellW - 1;
+            const y0 = y * cellH, y1 = (y + 1) * cellH - 1;
+            const points: [number, number][] = [
+                [(x0 + x1) / 2, (y0 + y1) / 2],
+                [x0, y0], [x1, y0], [x0, y1], [x1, y1],
+            ];
+            visible[idx(x, y)] = points.some(([sx, sy]) => alphaAt(Math.floor(sx), Math.floor(sy)) > ALPHA_THRESHOLD) ? 1 : 0;
+        }
+    }
+
+    const STAGES = 9; // generations a cell stays actively burning before turning to ash
+    // 0 = unburnt, 1..STAGES = burning (counts down each generation), -1 = ash (punched through)
+    const heat = new Int8Array(cellCount);
+    // Static per-cell noise standing in for paper density/moisture — cells
+    // with more "fuel" catch faster once a neighbor ignites them, which is
+    // what makes the front ragged instead of a smooth circle.
+    const fuel = new Float32Array(cellCount);
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            fuel[y * cols + x] = (simplex.noise2D(x * 0.3, y * 0.3) + 1) / 2;
+        }
+    }
+
+    // Marks cells that have ever been adjacent to fire (0/1), and how many
+    // generations ago that first happened. Used below to guarantee a cell
+    // can't stall forever unburnt: its normal per-roll chance only comes
+    // from a currently-burning neighbor, which stops attacking once it
+    // turns to ash after STAGES generations — an unlucky cell that never
+    // won that dice roll would otherwise just never catch, leaving the
+    // note permanently un-burned in spots.
+    const exposed = new Uint8Array(cellCount);
+    const exposureAge = new Uint16Array(cellCount);
+
+    // Lights a 3x3 cluster around a grid cell; returns whether anything
+    // actually caught (the cell might be off the note's visible artwork).
+    function igniteAround(cx: number, cy: number): boolean {
+        let ignited = false;
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                const gx = cx + dx, gy = cy + dy;
+                if (gx >= 0 && gx < cols && gy >= 0 && gy < rows && visible[idx(gx, gy)]) {
+                    heat[idx(gx, gy)] = STAGES;
+                    ignited = true;
+                }
+            }
+        }
+        return ignited;
+    }
+
+    // Starts from wherever the note is touching the coal (ignitionPoint, in
+    // canvas-local pixels), not always dead-center, so the fire reads as
+    // catching from the contact point. Falls back to the center if that
+    // point happens to land off the note's visible artwork (e.g. a
+    // transparent corner) or no ignition point was given.
+    const centerX = Math.round((cols - 1) / 2);
+    const centerY = Math.round((rows - 1) / 2);
+    if (ignitionPoint) {
+        const gx = Math.min(cols - 1, Math.max(0, Math.round(ignitionPoint.x / cellW - 0.5)));
+        const gy = Math.min(rows - 1, Math.max(0, Math.round(ignitionPoint.y / cellH - 0.5)));
+        if (!igniteAround(gx, gy)) igniteAround(centerX, centerY);
+    } else {
+        igniteAround(centerX, centerY);
+    }
+
+    const NEIGHBORS: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
+
+    // Advances the fire simulation by one generation: burning cells count
+    // down toward ash and roll a chance to ignite each unburnt neighbor.
+    // A cell stays "burning" (and re-rolls against its neighbors) for
+    // STAGES generations, so the per-roll chance has to stay low — a
+    // burning cell gets up to STAGES independent tries at each neighbor
+    // over its lifetime, and those compound fast. Without a low per-roll
+    // chance the whole grid flash-ignites in a couple of generations
+    // instead of spreading as a visible traveling front.
+    function step() {
+        const next = heat.slice();
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < cols; x++) {
+                const h = heat[idx(x, y)];
+                if (h <= 0) continue;
+                next[idx(x, y)] = h - 1 > 0 ? h - 1 : -1;
+                NEIGHBORS.forEach(([dx, dy]) => {
+                    const nx = x + dx, ny = y + dy;
+                    if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) return;
+                    const j = idx(nx, ny);
+                    if (!visible[j]) return; // off the note's artwork — nothing to burn there
+                    if (heat[j] !== 0) return; // already burning or ash
+                    exposed[j] = 1; // touched by fire — starts its catch-up clock below
+                    const diagonalPenalty = dx !== 0 && dy !== 0 ? 0.6 : 1;
+                    if (Math.random() < (0.018 + 0.045 * fuel[j]) * diagonalPenalty) next[j] = STAGES;
+                });
+            }
+        }
+
+        // Starvation escalation: any cell that's been exposed to fire but
+        // hasn't caught yet gets a steadily growing chance to ignite on its
+        // own each generation, independent of whether the neighbor that
+        // originally exposed it is still burning. This guarantees every
+        // exposed cell eventually catches within a bounded number of
+        // generations, instead of possibly never catching at all.
+        for (let i = 0; i < cellCount; i++) {
+            if (heat[i] !== 0 || !exposed[i]) continue;
+            exposureAge[i]++;
+            if (Math.random() < Math.min(1, 0.03 * exposureAge[i])) next[i] = STAGES;
+        }
+
+        heat.set(next);
+    }
 
     let embers: Ember[] = [];
     let start: number | null = null;
     let lastTs: number | null = null;
-
-    function edgePath(radius: number) {
-        const segments = 20;
-        ctx.beginPath();
-        for (let i = 0; i <= segments; i++) {
-            const angle = (i / segments) * Math.PI * 2;
-            const noise = simplex.noise2D(Math.cos(angle) * 1.6, Math.sin(angle) * 1.6 + radius * 0.015);
-            const r = Math.max(0, radius + noise * 9);
-            const x = cx + Math.cos(angle) * r;
-            const y = cy + Math.sin(angle) * r;
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
-        ctx.closePath();
-    }
-
-    function spawnEmbers(radius: number, count: number) {
-        for (let i = 0; i < count; i++) {
-            const angle = Math.random() * Math.PI * 2;
-            embers.push({
-                x: cx + Math.cos(angle) * radius,
-                y: cy + Math.sin(angle) * radius,
-                vx: (Math.random() - 0.5) * 0.03,
-                vy: -0.03 - Math.random() * 0.04,
-                size: 6 + Math.random() * 8,
-                life: 1,
-                decay: 0.012 + Math.random() * 0.014,
-            });
-        }
-    }
+    let stepAcc = 0;
+    const stepInterval = 25; // ms per CA generation — controls how fast the fire spreads (original 35 / 1.4)
+    const maxDuration = 3214; // safety cap so a burn always finishes even in a worst-case spread roll (original 4500 / 1.4)
 
     function frame(ts: number) {
         if (start === null) { start = ts; lastTs = ts; }
         const dt = ts - (lastTs as number);
         lastTs = ts;
-        const t = Math.min((ts - start) / duration, 1);
-        const radius = t * maxRadius;
+        const elapsed = ts - start;
 
-        if (t < 1) {
-            // charred smudge trailing just behind the flame front
-            edgePath(radius + 5);
-            ctx.lineWidth = 10;
-            ctx.strokeStyle = 'rgba(35, 18, 8, 0.5)';
-            ctx.stroke();
-
-            // bright ember line right at the burning edge
-            edgePath(radius);
-            ctx.lineWidth = 3;
-            ctx.strokeStyle = 'rgba(255, 130, 40, 0.9)';
-            ctx.stroke();
-
-            // eat away the burned paper
-            ctx.globalCompositeOperation = 'destination-out';
-            edgePath(Math.max(0, radius - 1));
-            ctx.fill();
-            ctx.globalCompositeOperation = 'source-over';
-
-            spawnEmbers(radius, 2);
+        stepAcc += dt;
+        while (stepAcc >= stepInterval) {
+            stepAcc -= stepInterval;
+            step();
         }
 
-        // embers drifting up off the burning edge
+        let burning = false;
+        for (let i = 0; i < cellCount; i++) if (heat[i] > 0) { burning = true; break; }
+        if (burning && elapsed > maxDuration) {
+            for (let i = 0; i < cellCount; i++) if (heat[i] > 0) heat[i] = -1;
+            burning = false;
+        }
+
+        ctx.clearRect(0, 0, width, height);
+        ctx.drawImage(baseCanvas, 0, 0);
+
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < cols; x++) {
+                const h = heat[idx(x, y)];
+                if (h === 0) continue;
+                const px = (x + 0.5) * cellW;
+                const py = (y + 0.5) * cellH;
+
+                if (h === -1) {
+                    // fillStyle must be fully opaque here — destination-out erases
+                    // by the fill's alpha, and this would otherwise inherit
+                    // whatever semi-transparent color a neighboring bright/char
+                    // cell last set, leaving a faint speckled "ghost" of paper
+                    // behind instead of a clean hole.
+                    ctx.fillStyle = '#000';
+                    ctx.globalCompositeOperation = 'destination-out';
+                    ctx.beginPath();
+                    ctx.arc(px, py, cellRadius, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.globalCompositeOperation = 'source-over';
+                    continue;
+                }
+
+                const t = h / STAGES;
+                if (t > 0.4) {
+                    // actively burning — bright, additive flame glow
+                    ctx.globalCompositeOperation = 'lighter';
+                    ctx.fillStyle = t > 0.66 ? 'rgba(255, 248, 220, 0.95)' : 'rgba(255, 160, 40, 0.9)';
+                    ctx.beginPath();
+                    ctx.arc(px, py, cellRadius, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.globalCompositeOperation = 'source-over';
+                    if (Math.random() < 0.05) {
+                        embers.push({
+                            x: px, y: py,
+                            vx: (Math.random() - 0.5) * 0.03,
+                            vy: -0.03 - Math.random() * 0.04,
+                            size: 6 + Math.random() * 8,
+                            life: 1,
+                            decay: 0.012 + Math.random() * 0.014,
+                        });
+                    }
+                } else {
+                    // burning out — solid dark char left behind before it ashes over
+                    ctx.fillStyle = 'rgba(20, 12, 8, 0.92)';
+                    ctx.beginPath();
+                    ctx.arc(px, py, cellRadius, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        }
+
+        // embers drifting up off the burning cells
         embers.forEach(e => {
             e.x += e.vx * dt;
             e.y += e.vy * dt;
@@ -116,7 +412,7 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
         ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = 'source-over';
 
-        if (t < 1 || embers.length > 0) {
+        if (burning || embers.length > 0) {
             requestAnimationFrame(frame);
         } else {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -131,8 +427,222 @@ const NoteList: React.FC = () => {
 
     const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
     const initializedIds = useRef<Set<string>>(new Set());
-    const { notes, isLoading, isError } = useNotes();
+    const burningIds = useRef<Set<string>>(new Set());
+    const stackSlots = useRef(0);
+    const dispenserRefs = useRef<(HTMLCanvasElement | null)[]>([]);
+    const coalRef = useRef<HTMLImageElement | null>(null);
+    // Ids of notes that arrived with an `ignite` flag (created directly on
+    // the coal) — consumed once that note's canvas has actually painted
+    // itself, since starting the burn any earlier would snapshot a blank
+    // canvas as the "pristine" note.
+    const igniteOnReady = useRef<Set<string>>(new Set());
+    // Grabs from the dispenser that are waiting on their real note to come
+    // back from the server, keyed by a token unique to that grab. Until
+    // then the template canvas stays at the drop point instead of snapping
+    // back — otherwise there's a gap (a server round trip wide) where
+    // neither the template nor the real note occupies that spot, which
+    // reads as the note flickering out and back in.
+    const pendingSpawns = useRef<Map<string, { canvas: HTMLCanvasElement; slotX: number; slotY: number }>>(new Map());
+    // A shared, ever-increasing counter: whichever note was grabbed most
+    // recently — by this client or, via note_dragging, another one — gets
+    // the highest z-index and stays on top, like the last sticky note you
+    // touched on a real desk.
+    const zCounter = useRef(1);
+    const bringToFront = (canvas: HTMLCanvasElement) => {
+        canvas.style.zIndex = String(++zCounter.current);
+    };
+    const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
+    // Handlers assigned inside the per-note init effect only run once per
+    // note (it's guarded so re-renders don't reset an in-progress burn),
+    // which freezes their closures to whatever `notes` was on that first
+    // render. Reading through this ref instead — kept in sync on every
+    // render — avoids acting on a stale snapshot from when the note first
+    // mounted (e.g. re-opening the editor would otherwise always show the
+    // note's original, blank text instead of whatever it currently says).
+    const notesRef = useRef<Note[] | undefined>(notes);
+    notesRef.current = notes;
+
+    // Whether a note dropped with its top-left at (x, y) — it's always
+    // 200x200 — overlaps the coal image, i.e. it's been "placed on the
+    // coal" and should start burning instead of just staying put there.
+    const isOverCoal = (x: number, y: number): boolean => {
+        const coal = coalRef.current;
+        if (!coal) return false;
+        const coalBox = coal.getBoundingClientRect();
+        return x < coalBox.right && x + 200 > coalBox.left && y < coalBox.bottom && y + 200 > coalBox.top;
+    };
+
+    // Moves a note's canvas to an absolute screen position, and remembers it
+    // in the SWR cache so a later re-render (or a page you didn't drag on)
+    // doesn't put it back in the stack.
+    const setNotePosition = (id: string, x: number, y: number) => {
+        const canvas = canvasRefs.current[id];
+        if (canvas) {
+            canvas.style.left = `${x}px`;
+            canvas.style.top = `${y}px`;
+        }
+        mutate(current => current?.map(n => (n._id === id ? { ...n, position: { x, y } } : n)), {
+            revalidate: false,
+        });
+    };
+
+    // Redraws a note's canvas with new text and remembers it in the SWR
+    // cache — used both right after this client finishes editing and when
+    // another client's note_text_changed arrives.
+    const setNoteText = (id: string, text: string) => {
+        const canvas = canvasRefs.current[id];
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                renderNote(ctx, canvas, text);
+            }
+        }
+        mutate(current => current?.map(n => (n._id === id ? { ...n, text } : n)), {
+            revalidate: false,
+        });
+    };
+
+    // Double-click opens a plain <textarea> positioned exactly over the
+    // note — canvas has no native text editing, so this overlays a real
+    // input, then bakes the result back into the canvas (via setNoteText)
+    // once the user clicks away. Escape cancels without committing.
+    const startEditingNote = (id: string) => {
+        if (burningIds.current.has(id)) return;
+        const canvas = canvasRefs.current[id];
+        if (!canvas) return;
+        const originalText = notesRef.current?.find(n => n._id === id)?.text ?? '';
+        const box = canvas.getBoundingClientRect();
+
+        const availableWidth = box.width - TEXT_PADDING * 2;
+        const availableHeight = box.height - TEXT_PADDING * 2;
+
+        const textarea = document.createElement('textarea');
+        textarea.value = originalText;
+        Object.assign(textarea.style, {
+            position: 'fixed',
+            left: `${box.left + TEXT_PADDING}px`,
+            top: `${box.top + TEXT_PADDING}px`,
+            width: `${availableWidth}px`,
+            height: `${availableHeight}px`,
+            zIndex: String(++zCounter.current),
+            border: 'none',
+            outline: 'none',
+            resize: 'none',
+            overflowY: 'hidden',
+            background: 'transparent',
+            textAlign: 'center',
+            font: `${TEXT_MAX_FONT_SIZE}px ${TEXT_FONT_FAMILY}`,
+            color: TEXT_COLOR,
+            boxSizing: 'border-box',
+        });
+        // The textarea's background is transparent (so the note's texture/
+        // shadow still shows through while editing) — but that means the
+        // canvas underneath is still visible too, and it still has the OLD
+        // text baked into its pixels until a commit redraws it. Blank the
+        // text out for the duration of the edit so it doesn't show through
+        // and visually overlap what's being typed on top of it.
+        const redrawCanvasText = (text: string) => {
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (text) renderNote(ctx, canvas, text);
+            else paintNote(ctx, canvas);
+        };
+        redrawCanvasText('');
+
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+
+        // Textareas always start their text at the top with no built-in way
+        // to vertically center it — fake it with padding-top, sized to
+        // whatever's left above the current text block so it sits centered
+        // the same way the committed, canvas-rendered text does.
+        const measureCtx = canvas.getContext('2d');
+        const updateVerticalCentering = () => {
+            if (!measureCtx) return;
+            measureCtx.font = `${TEXT_MAX_FONT_SIZE}px ${TEXT_FONT_FAMILY}`;
+            const lines = wrapText(measureCtx, textarea.value || ' ', availableWidth);
+            const lineHeight = TEXT_MAX_FONT_SIZE * 1.25;
+            const topPad = Math.max(0, (availableHeight - lines.length * lineHeight) / 2);
+            textarea.style.paddingTop = `${topPad}px`;
+        };
+        updateVerticalCentering();
+        // Live-broadcast every keystroke (no DB write — too frequent, same
+        // as dragging) so other clients see the text appear as it's typed,
+        // not just once this client commits it.
+        textarea.addEventListener('input', () => {
+            updateVerticalCentering();
+            socket.emit('note_typing', { id, text: textarea.value });
+        });
+
+        let settled = false;
+        const commit = () => {
+            if (settled) return;
+            settled = true;
+            textarea.remove();
+            const text = textarea.value.replace(/\s+$/, ''); // trailing newlines (e.g. from Enter before blurring) shouldn't be saved
+            if (text !== originalText) {
+                setNoteText(id, text);
+                socket.emit('note_text_changed', { id, text });
+            } else {
+                redrawCanvasText(originalText); // nothing changed — just restore what editing blanked out
+            }
+        };
+        const cancel = () => {
+            if (settled) return;
+            settled = true;
+            textarea.remove();
+            redrawCanvasText(originalText);
+        };
+        textarea.addEventListener('blur', commit);
+        textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') cancel();
+        });
+    };
+
+    // Starts the burn animation for a note on THIS client. `broadcast: true`
+    // (a local click) also tells every other client to start the same
+    // animation on their own board via the startBurn socket event; a
+    // broadcast we received from another client just plays it here without
+    // re-broadcasting. The guard against already-burning ids also prevents
+    // a stray double click from stacking two independent burn simulations
+    // on the same canvas.
+    const triggerBurn = (id: string, broadcast: boolean) => {
+        if (burningIds.current.has(id)) return;
+        const canvas = canvasRefs.current[id];
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        burningIds.current.add(id);
+        if (broadcast) socket.emit('startBurn', id);
+
+        // Start the fire from wherever the note is touching the coal
+        // rather than always dead-center: the closest point on the note's
+        // on-screen rect to the coal's center, converted to canvas-local
+        // pixel coordinates. Clamping the coal's center into the note's
+        // rect gives that closest point directly.
+        let ignitionPoint: { x: number; y: number } | undefined;
+        const coal = coalRef.current;
+        if (coal) {
+            const noteBox = canvas.getBoundingClientRect();
+            const coalBox = coal.getBoundingClientRect();
+            const coalCenterX = (coalBox.left + coalBox.right) / 2;
+            const coalCenterY = (coalBox.top + coalBox.bottom) / 2;
+            const closestX = Math.min(Math.max(coalCenterX, noteBox.left), noteBox.right);
+            const closestY = Math.min(Math.max(coalCenterY, noteBox.top), noteBox.bottom);
+            ignitionPoint = { x: closestX - noteBox.left, y: closestY - noteBox.top };
+        }
+
+        // Once the animation finishes, tell the server the note is gone for
+        // real; its noteDeleted broadcast is what drops the canvas from the
+        // page (on every client, whichever one of them burned it).
+        startBurn(canvas, ctx, new SimplexNoise(), () => {
+            socket.emit('deleteNote', id);
+        }, ignitionPoint);
+    };
 
     // Notes that have finished burning are dropped from the board entirely.
     const visibleNotes = useMemo(
@@ -145,14 +655,158 @@ const NoteList: React.FC = () => {
         setBurnedIds(prev => new Set(prev).add(id));
     };
 
+    // The server broadcasts noteAdded to every client (including the one that
+    // created it) — drop it straight into the SWR cache instead of waiting on
+    // the next revalidation, so new notes show up instantly. A note created
+    // directly on the coal carries `ignite: true`; every client records
+    // that here (synchronously, via a ref — no race with the re-render this
+    // triggers) so the per-note init effect can start burning it the moment
+    // its canvas is actually painted.
+    const addNote = (note: Note & { ignite?: boolean; clientToken?: string }) => {
+        if (note.ignite) igniteOnReady.current.add(note._id);
+        // The real note has arrived — now it's safe to send the dispenser
+        // template that spawned it back to its slot without a visible gap.
+        if (note.clientToken) {
+            const pending = pendingSpawns.current.get(note.clientToken);
+            if (pending) {
+                pending.canvas.style.left = `${pending.slotX}px`;
+                pending.canvas.style.top = `${pending.slotY}px`;
+                pendingSpawns.current.delete(note.clientToken);
+            }
+        }
+        mutate(current => (current?.some(n => n._id === note._id) ? current : [...(current ?? []), note]), {
+            revalidate: false,
+        });
+    };
+
     // The server deletes the note and broadcasts noteDeleted to every client
     // (including this one) once it's gone — that's what actually drops it
     // from the board, whether it was burned here or in another tab.
     useEffect(() => {
-        socket.on('noteDeleted', removeNote);
-        return () => {
-            socket.off('noteDeleted', removeNote);
+        const onRemoteBurn = (id: string) => triggerBurn(id, false);
+        // Live position updates from another client dragging a note (no DB
+        // write yet — see note_dragging on the server) and the final
+        // position once they let go. Only moves the canvas on THIS client;
+        // the dragging client already moved its own via setNotePosition.
+        const onDragging = ({ id, x, y }: { id: string; x: number; y: number }) => {
+            const canvas = canvasRefs.current[id];
+            if (canvas) {
+                canvas.style.left = `${x}px`;
+                canvas.style.top = `${y}px`;
+                bringToFront(canvas); // another client just grabbed/moved this one — keep the "last touched" ordering in sync
+            }
         };
+        const onMoved = ({ id, x, y }: { id: string; x: number; y: number }) => setNotePosition(id, x, y);
+        // Live text updates from another client's in-progress edit — just
+        // repaints the canvas, doesn't touch the SWR cache (mirrors
+        // onDragging above); note_text_changed is what actually commits it.
+        const onTyping = ({ id, text }: { id: string; text: string }) => {
+            const canvas = canvasRefs.current[id];
+            const ctx = canvas?.getContext('2d');
+            if (!canvas || !ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            renderNote(ctx, canvas, text);
+        };
+        const onTextChanged = ({ id, text }: { id: string; text: string }) => setNoteText(id, text);
+        socket.on('noteAdded', addNote);
+        socket.on('noteDeleted', removeNote);
+        socket.on('startBurn', onRemoteBurn);
+        socket.on('note_dragging', onDragging);
+        socket.on('note_moved', onMoved);
+        socket.on('note_typing', onTyping);
+        socket.on('note_text_changed', onTextChanged);
+        return () => {
+            socket.off('noteAdded', addNote);
+            socket.off('noteDeleted', removeNote);
+            socket.off('startBurn', onRemoteBurn);
+            socket.off('note_dragging', onDragging);
+            socket.off('note_moved', onMoved);
+            socket.off('note_typing', onTyping);
+            socket.off('note_text_changed', onTextChanged);
+        };
+    }, []);
+
+    // The corner dispenser: DISPENSER_COUNT template notes that are never
+    // spent. Dragging one off spawns a real note at the drop point (via
+    // addNote's position, so it's already "placed" the moment it arrives —
+    // see paintNote/isPlaced above) while the template itself snaps back to
+    // its slot, ready to be grabbed again. Runs once — the dispenser has
+    // nothing to do with which real notes exist.
+    useEffect(() => {
+        for (let i = 0; i < DISPENSER_COUNT; i++) {
+            const canvas = dispenserRefs.current[i];
+            if (!canvas) continue;
+            canvas.width = 200;
+            canvas.height = 200;
+            canvas.style.position = 'fixed';
+            canvas.style.touchAction = 'none';
+
+            const slotX = DISPENSER_ORIGIN.x + i * STACK_OFFSET_STEP;
+            const slotY = DISPENSER_ORIGIN.y + i * STACK_OFFSET_STEP;
+            canvas.style.left = `${slotX}px`;
+            canvas.style.top = `${slotY}px`;
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) continue;
+            paintNote(ctx, canvas);
+
+            let dragOrigin: { pointerX: number; pointerY: number } | null = null;
+            let dragged = false;
+
+            canvas.onpointerdown = (e) => {
+                canvas.setPointerCapture(e.pointerId);
+                bringToFront(canvas);
+                dragged = false;
+                dragOrigin = { pointerX: e.clientX, pointerY: e.clientY };
+            };
+
+            canvas.onpointermove = (e) => {
+                if (!dragOrigin) return;
+                const dx = e.clientX - dragOrigin.pointerX;
+                const dy = e.clientY - dragOrigin.pointerY;
+                if (!dragged && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                dragged = true;
+                canvas.style.left = `${slotX + dx}px`;
+                canvas.style.top = `${slotY + dy}px`;
+            };
+
+            canvas.onpointerup = (e) => {
+                canvas.releasePointerCapture(e.pointerId);
+                const wasDragged = dragged;
+                const dropX = parseFloat(canvas.style.left) || slotX;
+                const dropY = parseFloat(canvas.style.top) || slotY;
+                dragOrigin = null;
+                dragged = false;
+                if (!wasDragged) {
+                    canvas.style.left = `${slotX}px`;
+                    canvas.style.top = `${slotY}px`;
+                    return;
+                }
+                // Stay at the drop point — don't snap back to the slot yet.
+                // The dispenser is infinite (grabbing one doesn't shrink the
+                // pile), but resetting immediately would leave a gap where
+                // neither this template nor the real note (still in flight
+                // to the server) occupies the drop spot, which reads as a
+                // flicker. addNote's matching noteAdded snaps it back once
+                // the real note is actually ready to take over.
+                const token = `${Date.now()}-${Math.random()}`;
+                pendingSpawns.current.set(token, { canvas, slotX, slotY });
+                // Safety net: if a response never arrives (dropped
+                // connection, server error), don't leave the template
+                // stranded off its slot forever.
+                setTimeout(() => {
+                    if (!pendingSpawns.current.delete(token)) return;
+                    canvas.style.left = `${slotX}px`;
+                    canvas.style.top = `${slotY}px`;
+                }, 4000);
+                socket.emit('addNote', {
+                    text: '',
+                    position: { x: dropX, y: dropY },
+                    ignite: isOverCoal(dropX, dropY),
+                    clientToken: token,
+                });
+            };
+        }
     }, []);
 
     useEffect(() => {
@@ -169,46 +823,122 @@ const NoteList: React.FC = () => {
             canvas.dataset.id = note._id;
             canvas.setAttribute('name', note._id);
 
+            // Freely draggable anywhere on the screen — placed notes render
+            // at their saved position, everything else piles up in the
+            // corner stack until someone drags it out.
+            canvas.style.position = 'fixed';
+            canvas.style.touchAction = 'none'; // don't let touch-scroll fight the drag
+            if (isPlaced(note)) {
+                canvas.style.left = `${note.position.x}px`;
+                canvas.style.top = `${note.position.y}px`;
+            } else {
+                // Legacy fallback — new notes always come from the
+                // dispenser with a position already set, so this only
+                // applies to notes created before the dispenser existed.
+                const slot = stackSlots.current++;
+                canvas.style.left = `${LEGACY_STACK_ORIGIN.x + slot * STACK_OFFSET_STEP}px`;
+                canvas.style.top = `${LEGACY_STACK_ORIGIN.y + slot * STACK_OFFSET_STEP}px`;
+            }
+
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            renderNote(ctx, canvas, note.text ?? '', () => {
+                // Created directly on the coal — ignite now that the
+                // canvas actually has the note artwork painted on it.
+                if (igniteOnReady.current.delete(note._id)) triggerBurn(note._id, false);
+            });
 
-            const simplex = new SimplexNoise();
+            canvas.ondblclick = () => startEditingNote(note._id);
 
-            const postit = new Image();
-            postit.src = postitUrl;
+            // Pointer-based drag, distinguished from a click by movement
+            // distance: a short move still counts as a click (burns the
+            // note); crossing DRAG_THRESHOLD switches to dragging it around
+            // and suppresses the burn on release.
+            let dragOrigin: { pointerX: number; pointerY: number; startLeft: number; startTop: number } | null = null;
+            let dragged = false;
 
-            postit.onload = () => {
-                ctx.drawImage(postit, 0, 0, canvas.width, canvas.height);
+            canvas.onpointerdown = (e) => {
+                if (burningIds.current.has(note._id)) return; // already on fire — leave it be
+                canvas.setPointerCapture(e.pointerId);
+                bringToFront(canvas);
+                dragged = false;
+                dragOrigin = {
+                    pointerX: e.clientX,
+                    pointerY: e.clientY,
+                    startLeft: parseFloat(canvas.style.left) || 0,
+                    startTop: parseFloat(canvas.style.top) || 0,
+                };
             };
 
-            canvas.onclick = () => {
-                // Once the animation finishes, tell the server the note is
-                // gone for real; its noteDeleted broadcast (above) is what
-                // drops the canvas from the page.
-                startBurn(canvas, ctx, simplex, () => {
-                    socket.emit('deleteNote', note._id);
-                });
-            }
+            canvas.onpointermove = (e) => {
+                if (!dragOrigin) return;
+                const dx = e.clientX - dragOrigin.pointerX;
+                const dy = e.clientY - dragOrigin.pointerY;
+                if (!dragged && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                dragged = true;
+                const x = dragOrigin.startLeft + dx;
+                const y = dragOrigin.startTop + dy;
+                canvas.style.left = `${x}px`;
+                canvas.style.top = `${y}px`;
+                // Live position only — no DB write here, too frequent (see server).
+                socket.emit('note_dragging', { id: note._id, x, y });
+            };
+
+            canvas.onpointerup = (e) => {
+                canvas.releasePointerCapture(e.pointerId);
+                const wasDragged = dragged;
+                dragOrigin = null;
+                dragged = false;
+                if (!wasDragged) return; // a plain click no longer does anything — burning is triggered by dropping on the coal
+                const x = parseFloat(canvas.style.left) || 0;
+                const y = parseFloat(canvas.style.top) || 0;
+                if (isOverCoal(x, y)) {
+                    triggerBurn(note._id, true);
+                    return;
+                }
+                socket.emit('note_drag_end', { id: note._id, x, y });
+                setNotePosition(note._id, x, y);
+            };
         })
 
     }, [visibleNotes]);
 
 
 
-    if (isLoading) return <p>Loading...</p>;
-    if (isError) return <p style={{ color: 'red' }}>Failed to load notes</p>;
-
-    // return <canvas ref={canvasRef} />;
-
     const setCanvasRef = (id: string) => (el: HTMLCanvasElement | null): void => {
         if (el) canvasRefs.current[id] = el;
         else delete canvasRefs.current[id];
     };
 
+    // The dispenser canvases must always render, even while notes are still
+    // loading — the dispenser-setup effect above has an empty dependency
+    // array (it only runs once), so if these were behind the isLoading/
+    // isError early returns like before, they wouldn't exist yet on the
+    // render that effect fires after, and the dispenser would never get
+    // wired up at all.
     return (
         <div>
-            {visibleNotes.map((note) => (
+            <img
+                ref={coalRef}
+                src={coalUrl}
+                alt=""
+                style={{
+                    position: 'fixed',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    width: COAL_SIZE,
+                    height: COAL_SIZE,
+                    pointerEvents: 'none', // sits under draggable notes without blocking them
+                }}
+            />
+            {Array.from({ length: DISPENSER_COUNT }, (_, i) => (
+                <canvas key={`dispenser-${i}`} ref={(el) => { dispenserRefs.current[i] = el; }} />
+            ))}
+            {isLoading && <p>Loading...</p>}
+            {isError && <p style={{ color: 'red' }}>Failed to load notes</p>}
+            {!isLoading && !isError && visibleNotes.map((note) => (
                 <canvas key={note._id} id={note._id} ref={setCanvasRef(String(note._id))} />
             ))}
         </div>

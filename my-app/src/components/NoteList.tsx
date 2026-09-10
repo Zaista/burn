@@ -530,7 +530,13 @@ const NoteList: React.FC = () => {
             textarea.style.paddingTop = `${topPad}px`;
         };
         updateVerticalCentering();
-        textarea.addEventListener('input', updateVerticalCentering);
+        // Live-broadcast every keystroke (no DB write — too frequent, same
+        // as dragging) so other clients see the text appear as it's typed,
+        // not just once this client commits it.
+        textarea.addEventListener('input', () => {
+            updateVerticalCentering();
+            socket.emit('note_typing', { id, text: textarea.value });
+        });
 
         let settled = false;
         const commit = () => {
@@ -648,12 +654,23 @@ const NoteList: React.FC = () => {
             }
         };
         const onMoved = ({ id, x, y }: { id: string; x: number; y: number }) => setNotePosition(id, x, y);
+        // Live text updates from another client's in-progress edit — just
+        // repaints the canvas, doesn't touch the SWR cache (mirrors
+        // onDragging above); note_text_changed is what actually commits it.
+        const onTyping = ({ id, text }: { id: string; text: string }) => {
+            const canvas = canvasRefs.current[id];
+            const ctx = canvas?.getContext('2d');
+            if (!canvas || !ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            renderNote(ctx, canvas, text);
+        };
         const onTextChanged = ({ id, text }: { id: string; text: string }) => setNoteText(id, text);
         socket.on('noteAdded', addNote);
         socket.on('noteDeleted', removeNote);
         socket.on('startBurn', onRemoteBurn);
         socket.on('note_dragging', onDragging);
         socket.on('note_moved', onMoved);
+        socket.on('note_typing', onTyping);
         socket.on('note_text_changed', onTextChanged);
         return () => {
             socket.off('noteAdded', addNote);
@@ -661,6 +678,7 @@ const NoteList: React.FC = () => {
             socket.off('startBurn', onRemoteBurn);
             socket.off('note_dragging', onDragging);
             socket.off('note_moved', onMoved);
+            socket.off('note_typing', onTyping);
             socket.off('note_text_changed', onTextChanged);
         };
     }, []);

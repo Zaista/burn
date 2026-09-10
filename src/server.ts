@@ -77,6 +77,12 @@ io.on('connection', (socket) => {
         // TODO save the position to MongoDB
     });
 
+    // Live text while someone is actively typing (no DB write — too
+    // frequent, same as note_dragging above).
+    socket.on('note_typing', ({ id, text }: { id: string; text: string }) => {
+        socket.broadcast.emit('note_typing', { id, text });
+    });
+
     // A note's text was edited (double-click to edit on the client) — save
     // it and let every other client redraw that note with the new text.
     socket.on('note_text_changed', async ({ id, text }: { id: string; text: string }) => {

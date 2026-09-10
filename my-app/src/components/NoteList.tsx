@@ -239,8 +239,8 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
     let start: number | null = null;
     let lastTs: number | null = null;
     let stepAcc = 0;
-    const stepInterval = 35; // ms per CA generation — controls how fast the fire spreads
-    const maxDuration = 4500; // safety cap so a burn always finishes even in a worst-case spread roll
+    const stepInterval = 25; // ms per CA generation — controls how fast the fire spreads (original 35 / 1.4)
+    const maxDuration = 3214; // safety cap so a burn always finishes even in a worst-case spread roll (original 4500 / 1.4)
 
     function frame(ts: number) {
         if (start === null) { start = ts; lastTs = ts; }

@@ -329,8 +329,19 @@ const NoteList: React.FC = () => {
     const burningIds = useRef<Set<string>>(new Set());
     const stackSlots = useRef(0);
     const dispenserRefs = useRef<(HTMLCanvasElement | null)[]>([]);
+    const coalRef = useRef<HTMLImageElement | null>(null);
     const { notes, isLoading, isError, mutate } = useNotes();
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
+
+    // Whether a note dropped with its top-left at (x, y) — it's always
+    // 200x200 — overlaps the coal image, i.e. it's been "placed on the
+    // coal" and should start burning instead of just staying put there.
+    const isOverCoal = (x: number, y: number): boolean => {
+        const coal = coalRef.current;
+        if (!coal) return false;
+        const coalBox = coal.getBoundingClientRect();
+        return x < coalBox.right && x + 200 > coalBox.left && y < coalBox.bottom && y + 200 > coalBox.top;
+    };
 
     // Moves a note's canvas to an absolute screen position, and remembers it
     // in the SWR cache so a later re-render (or a page you didn't drag on)
@@ -554,14 +565,15 @@ const NoteList: React.FC = () => {
                 const wasDragged = dragged;
                 dragOrigin = null;
                 dragged = false;
-                if (wasDragged) {
-                    const x = parseFloat(canvas.style.left) || 0;
-                    const y = parseFloat(canvas.style.top) || 0;
-                    socket.emit('note_drag_end', { id: note._id, x, y });
-                    setNotePosition(note._id, x, y);
-                } else {
+                if (!wasDragged) return; // a plain click no longer does anything — burning is triggered by dropping on the coal
+                const x = parseFloat(canvas.style.left) || 0;
+                const y = parseFloat(canvas.style.top) || 0;
+                if (isOverCoal(x, y)) {
                     triggerBurn(note._id, true);
+                    return;
                 }
+                socket.emit('note_drag_end', { id: note._id, x, y });
+                setNotePosition(note._id, x, y);
             };
         })
 
@@ -583,6 +595,7 @@ const NoteList: React.FC = () => {
     return (
         <div>
             <img
+                ref={coalRef}
                 src={coalUrl}
                 alt=""
                 style={{

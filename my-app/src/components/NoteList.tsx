@@ -85,7 +85,7 @@ function paintNote(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, onD
 // orange, then a dark char — before turning to ash and disappearing. This is
 // the standard technique for a convincing "burning paper" look; a single
 // jittered outline (the previous approach) reads as a stylized wipe, not fire.
-function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, simplex: SimplexNoise, onComplete?: () => void) {
+function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, simplex: SimplexNoise, onComplete?: () => void, ignitionPoint?: { x: number; y: number }) {
     const { width, height } = canvas;
     const cellSize = 5;
     const cols = Math.max(1, Math.round(width / cellSize));
@@ -159,14 +159,35 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
     const exposed = new Uint8Array(cellCount);
     const exposureAge = new Uint16Array(cellCount);
 
-    const originX = (cols - 1) / 2;
-    const originY = (rows - 1) / 2;
-    for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-            const gx = Math.round(originX + dx);
-            const gy = Math.round(originY + dy);
-            if (gx >= 0 && gx < cols && gy >= 0 && gy < rows && visible[idx(gx, gy)]) heat[idx(gx, gy)] = STAGES;
+    // Lights a 3x3 cluster around a grid cell; returns whether anything
+    // actually caught (the cell might be off the note's visible artwork).
+    function igniteAround(cx: number, cy: number): boolean {
+        let ignited = false;
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                const gx = cx + dx, gy = cy + dy;
+                if (gx >= 0 && gx < cols && gy >= 0 && gy < rows && visible[idx(gx, gy)]) {
+                    heat[idx(gx, gy)] = STAGES;
+                    ignited = true;
+                }
+            }
         }
+        return ignited;
+    }
+
+    // Starts from wherever the note is touching the coal (ignitionPoint, in
+    // canvas-local pixels), not always dead-center, so the fire reads as
+    // catching from the contact point. Falls back to the center if that
+    // point happens to land off the note's visible artwork (e.g. a
+    // transparent corner) or no ignition point was given.
+    const centerX = Math.round((cols - 1) / 2);
+    const centerY = Math.round((rows - 1) / 2);
+    if (ignitionPoint) {
+        const gx = Math.min(cols - 1, Math.max(0, Math.round(ignitionPoint.x / cellW - 0.5)));
+        const gy = Math.min(rows - 1, Math.max(0, Math.round(ignitionPoint.y / cellH - 0.5)));
+        if (!igniteAround(gx, gy)) igniteAround(centerX, centerY);
+    } else {
+        igniteAround(centerX, centerY);
     }
 
     const NEIGHBORS: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
@@ -377,12 +398,30 @@ const NoteList: React.FC = () => {
         if (!ctx) return;
         burningIds.current.add(id);
         if (broadcast) socket.emit('startBurn', id);
+
+        // Start the fire from wherever the note is touching the coal
+        // rather than always dead-center: the closest point on the note's
+        // on-screen rect to the coal's center, converted to canvas-local
+        // pixel coordinates. Clamping the coal's center into the note's
+        // rect gives that closest point directly.
+        let ignitionPoint: { x: number; y: number } | undefined;
+        const coal = coalRef.current;
+        if (coal) {
+            const noteBox = canvas.getBoundingClientRect();
+            const coalBox = coal.getBoundingClientRect();
+            const coalCenterX = (coalBox.left + coalBox.right) / 2;
+            const coalCenterY = (coalBox.top + coalBox.bottom) / 2;
+            const closestX = Math.min(Math.max(coalCenterX, noteBox.left), noteBox.right);
+            const closestY = Math.min(Math.max(coalCenterY, noteBox.top), noteBox.bottom);
+            ignitionPoint = { x: closestX - noteBox.left, y: closestY - noteBox.top };
+        }
+
         // Once the animation finishes, tell the server the note is gone for
         // real; its noteDeleted broadcast is what drops the canvas from the
         // page (on every client, whichever one of them burned it).
         startBurn(canvas, ctx, new SimplexNoise(), () => {
             socket.emit('deleteNote', id);
-        });
+        }, ignitionPoint);
     };
 
     // Notes that have finished burning are dropped from the board entirely.

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { useRecentRooms } from '../hooks/useRecentRooms';
 
 const API_BASE = 'http://localhost:3000';
 
@@ -11,6 +12,7 @@ export default function Landing() {
     const [name, setName] = useState('');
     const [creating, setCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const { rooms, recordVisit } = useRecentRooms();
 
     const trimmedName = name.trim();
 
@@ -29,6 +31,7 @@ export default function Landing() {
             });
             if (!res.ok) throw new Error('Failed to create room');
             const { id } = await res.json();
+            recordVisit(id, trimmedName);
             navigate(`/room/${id}`);
         } catch {
             setError('Could not create a room — is the server running?');
@@ -60,6 +63,21 @@ export default function Landing() {
                 {creating ? 'Creating…' : 'Create a room'}
             </button>
             {error && <p style={{ color: 'red' }}>{error}</p>}
+
+            {rooms.length > 0 && (
+                <div style={{ marginTop: '2rem', width: '100%', maxWidth: 320, textAlign: 'left' }}>
+                    <h2 style={{ fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em', opacity: 0.6, margin: '0 0 0.5rem' }}>
+                        Your rooms
+                    </h2>
+                    <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                        {rooms.map((room) => (
+                            <li key={room.id}>
+                                <Link to={`/room/${room.id}`}>{room.name}</Link>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
         </div>
     );
 }

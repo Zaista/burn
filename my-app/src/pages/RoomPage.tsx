@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import useSWR from 'swr';
 import { useParams } from 'react-router-dom';
 import NoteList from '../components/NoteList';
 import ShareLink from '../components/ShareLink';
 import RoomTitle from '../components/RoomTitle';
 import HomeButton from '../components/HomeButton';
+import { useRecentRooms } from '../hooks/useRecentRooms';
 
 const API_BASE = 'http://localhost:3000';
 
@@ -21,6 +22,15 @@ const fetcher = (url: string) => fetch(url).then((res) => {
 export default function RoomPage() {
     const { roomId } = useParams<{ roomId: string }>();
     const { data, error, isLoading } = useSWR<RoomInfo>(roomId ? `${API_BASE}/rooms/${roomId}` : null, fetcher);
+    const { recordVisit } = useRecentRooms();
+
+    // Only fires once the room is confirmed to exist (data.name is unset
+    // while loading or on a 404) — this is what catches a room reached via
+    // a shared link rather than created here, and also keeps the stored
+    // name fresh if it's been renamed since the last visit.
+    useEffect(() => {
+        if (roomId && data?.name) recordVisit(roomId, data.name);
+    }, [roomId, data?.name, recordVisit]);
 
     if (isLoading) return <p style={{ textAlign: 'center', marginTop: '4rem' }}>Loading room…</p>;
 

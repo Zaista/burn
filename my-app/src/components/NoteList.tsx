@@ -423,7 +423,7 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
     requestAnimationFrame(frame);
 }
 
-const NoteList: React.FC = () => {
+const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
     const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
     const initializedIds = useRef<Set<string>>(new Set());
@@ -451,7 +451,7 @@ const NoteList: React.FC = () => {
     const bringToFront = (canvas: HTMLCanvasElement) => {
         canvas.style.zIndex = String(++zCounter.current);
     };
-    const { notes, isLoading, isError, mutate } = useNotes();
+    const { notes, isLoading, isError, mutate } = useNotes(roomId);
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
     // Handlers assigned inside the per-note init effect only run once per
     // note (it's guarded so re-renders don't reset an in-progress burn),
@@ -678,6 +678,20 @@ const NoteList: React.FC = () => {
             revalidate: false,
         });
     };
+
+    // Tells the server which room this socket belongs to, so every event it
+    // sends/receives from here on is scoped to this room's board instead of
+    // leaking to every other room. Re-sent on every 'connect' (initial
+    // connect and any reconnect) since the server only remembers it for the
+    // lifetime of that one underlying connection.
+    useEffect(() => {
+        const join = () => socket.emit('joinRoom', roomId);
+        join();
+        socket.on('connect', join);
+        return () => {
+            socket.off('connect', join);
+        };
+    }, [roomId]);
 
     // The server deletes the note and broadcasts noteDeleted to every client
     // (including this one) once it's gone — that's what actually drops it

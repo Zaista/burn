@@ -15,8 +15,11 @@ const fetcher = (url: string) => fetch(url).then((res) => {
     return res.json();
 });
 
-export function useNotes() {
-    const { data, error, isLoading, mutate } = useSWR<Note[]>('http://localhost:3000/notes', fetcher);
+export function useNotes(roomId: string) {
+    const { data, error, isLoading, mutate } = useSWR<Note[]>(
+        roomId ? `http://localhost:3000/rooms/${roomId}/notes` : null,
+        fetcher
+    );
 
     return {
         notes: data,

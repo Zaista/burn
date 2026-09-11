@@ -26,8 +26,7 @@ export default function RoomPage() {
 
     // Only fires once the room is confirmed to exist (data.name is unset
     // while loading or on a 404) — this is what catches a room reached via
-    // a shared link rather than created here, and also keeps the stored
-    // name fresh if it's been renamed since the last visit.
+    // a shared link rather than created here.
     useEffect(() => {
         if (roomId && data?.name) recordVisit(roomId, data.name);
     }, [roomId, data?.name, recordVisit]);
@@ -44,8 +43,7 @@ export default function RoomPage() {
     }
 
     // Keying by roomId forces a full remount when navigating between rooms,
-    // so NoteList's (and RoomTitle's) per-room state never carries over from
-    // a previous room.
+    // so NoteList's per-room state never carries over from a previous room.
     return (
         <>
             <div style={{
@@ -59,7 +57,7 @@ export default function RoomPage() {
                 <HomeButton />
                 <ShareLink />
             </div>
-            <RoomTitle initialName={data?.name ?? ''} key={`title-${roomId}`} />
+            <RoomTitle name={data?.name ?? ''} />
             <NoteList roomId={roomId} key={roomId} />
         </>
     );

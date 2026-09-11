@@ -96,20 +96,6 @@ io.on('connection', (socket) => {
         socket.join(roomId);
     });
 
-    // A room can be renamed at any time, not just at creation — persist it
-    // and let every other viewer's title update live, the same
-    // live-broadcast pattern as note_text_changed. The name stays mandatory
-    // after creation too, so an empty/whitespace-only rename is ignored
-    // rather than blanking the room out.
-    socket.on('room_rename', async (name: string) => {
-        const roomId = socket.data.roomId;
-        if (!roomId || typeof name !== 'string') return;
-        const trimmed = name.trim().slice(0, ROOM_NAME_MAX_LENGTH);
-        if (!trimmed) return;
-        await Room.findByIdAndUpdate(roomId, { name: trimmed });
-        socket.to(roomId).emit('room_renamed', trimmed);
-    });
-
     // `position` is set when a note is created by dragging it off the
     // corner stack (its drop point) — omitted (or optional fields on the
     // payload) leaves the note unpositioned, so the client falls back to

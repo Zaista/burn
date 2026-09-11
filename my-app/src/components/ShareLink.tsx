@@ -1,0 +1,26 @@
+import React, { useState } from 'react';
+
+// Sharing a room is just sharing its URL — there's no invite flow, the link
+// itself grants access. This just saves a manual copy from the address bar.
+// Unstyled for position: sits in the top-right toolbar alongside HomeButton
+// (see RoomPage).
+export default function ShareLink() {
+    const [copied, setCopied] = useState(false);
+
+    const copyLink = async () => {
+        try {
+            await navigator.clipboard.writeText(window.location.href);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        } catch {
+            // Clipboard access can be denied (permissions, insecure context) —
+            // fail silently, the link is still right there in the address bar.
+        }
+    };
+
+    return (
+        <button onClick={copyLink}>
+            {copied ? 'Link copied!' : 'Share room'}
+        </button>
+    );
+}

@@ -1,12 +1,18 @@
-# React + Vite
+# Burn — frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite frontend for [Burn](../CLAUDE.md), a real-time shared post-it
+board with a canvas-based fire animation. No login — a room's link is what
+grants access to it.
 
-Currently, two official plugins are available:
+Run from here, or with `npm --prefix my-app run <script>` from the repo root:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+```bash
+npm run dev       # vite dev server (port 5173)
+npm run build     # vite build
+npm run lint      # eslint .
+npm run preview   # preview the production build
+```
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Needs the backend running too (`npm run dev` from the repo root) — see the
+root [CLAUDE.md](../CLAUDE.md) for the full setup (MongoDB, backend
+commands, architecture).

@@ -423,7 +423,7 @@ function startBurn(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, sim
     requestAnimationFrame(frame);
 }
 
-const NoteList: React.FC = () => {
+const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
     const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
     const initializedIds = useRef<Set<string>>(new Set());
@@ -451,7 +451,7 @@ const NoteList: React.FC = () => {
     const bringToFront = (canvas: HTMLCanvasElement) => {
         canvas.style.zIndex = String(++zCounter.current);
     };
-    const { notes, isLoading, isError, mutate } = useNotes();
+    const { notes, isLoading, isError, mutate } = useNotes(roomId);
     const [burnedIds, setBurnedIds] = useState<Set<string>>(new Set());
     // Handlers assigned inside the per-note init effect only run once per
     // note (it's guarded so re-renders don't reset an in-progress burn),
@@ -679,6 +679,20 @@ const NoteList: React.FC = () => {
         });
     };
 
+    // Tells the server which room this socket belongs to, so every event it
+    // sends/receives from here on is scoped to this room's board instead of
+    // leaking to every other room. Re-sent on every 'connect' (initial
+    // connect and any reconnect) since the server only remembers it for the
+    // lifetime of that one underlying connection.
+    useEffect(() => {
+        const join = () => socket.emit('joinRoom', roomId);
+        join();
+        socket.on('connect', join);
+        return () => {
+            socket.off('connect', join);
+        };
+    }, [roomId]);
+
     // The server deletes the note and broadcasts noteDeleted to every client
     // (including this one) once it's gone — that's what actually drops it
     // from the board, whether it was burned here or in another tab.
@@ -724,6 +738,13 @@ const NoteList: React.FC = () => {
             socket.off('note_typing', onTyping);
             socket.off('note_text_changed', onTextChanged);
         };
+    // addNote/setNotePosition/setNoteText aren't in the deps array on
+    // purpose: each only touches refs (canvasRefs, pendingSpawns,
+    // igniteOnReady) or mutate's functional-update form, never a stale
+    // reactive value directly, so the listeners registered at mount stay
+    // correct for the life of the component — no need to re-subscribe every
+    // render just to satisfy exhaustive-deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // The corner dispenser: DISPENSER_COUNT template notes that are never
@@ -902,6 +923,13 @@ const NoteList: React.FC = () => {
             };
         })
 
+    // setNotePosition/startEditingNote aren't in the deps array on purpose,
+    // same reasoning as the socket-listener effect above: this effect's own
+    // initializedIds guard means each note's canvas is only ever wired up
+    // once, and both functions only touch refs or mutate's functional-
+    // update form, so whichever closure got captured on that first run stays
+    // correct.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [visibleNotes]);
 
 
@@ -943,32 +971,6 @@ const NoteList: React.FC = () => {
             ))}
         </div>
     )
-
-    // return (
-    //     <ul>
-    //         {notes.map((user) => (
-    //             <li key={user._id}>y: {JSON.stringify(user.position?.y)}
-    //                 x: {<strong>{user.position?.x}</strong>}
-    //             </li>
-    //         ))}
-    //     </ul>
-    // );
 };
 
 export default NoteList;
-
-
-
-
-// function useNote() {
-//     const getNotes = () => fetch('/notes').then(res => res.json())
-//     // const uid = '<note_id>'
-//     const fetcher: Fetcher<Note, string> = (id) => getNotes()
-//     const { data, error, isLoading } = useSWR('', fetcher)
-//     console.log(data)
-//     return {
-//         note: data,
-//         isLoading,
-//         isError: error
-//     }
-// }

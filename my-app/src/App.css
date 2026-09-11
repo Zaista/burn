@@ -5,3 +5,29 @@
   text-align: center;
 }
 
+/* Landing page's room-name field, styled to pair with the global button
+   rule in index.css (same radius/padding/font, same accent on focus) while
+   keeping a real border so it still reads as a text field next to it. */
+.room-name-input {
+  border-radius: 8px;
+  border: 1px solid #d0d0d5;
+  padding: 0.6em 1em;
+  font-size: 1em;
+  font-family: inherit;
+  background-color: #ffffff;
+  color: inherit;
+  min-width: 240px;
+  transition: border-color 0.25s;
+}
+.room-name-input:hover {
+  border-color: #646cff;
+}
+.room-name-input:focus,
+.room-name-input:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+  border-color: #646cff;
+}
+.room-name-input::placeholder {
+  color: #9a9aa2;
+}
+

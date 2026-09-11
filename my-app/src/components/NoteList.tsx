@@ -738,6 +738,13 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             socket.off('note_typing', onTyping);
             socket.off('note_text_changed', onTextChanged);
         };
+    // addNote/setNotePosition/setNoteText aren't in the deps array on
+    // purpose: each only touches refs (canvasRefs, pendingSpawns,
+    // igniteOnReady) or mutate's functional-update form, never a stale
+    // reactive value directly, so the listeners registered at mount stay
+    // correct for the life of the component — no need to re-subscribe every
+    // render just to satisfy exhaustive-deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // The corner dispenser: DISPENSER_COUNT template notes that are never
@@ -916,6 +923,13 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             };
         })
 
+    // setNotePosition/startEditingNote aren't in the deps array on purpose,
+    // same reasoning as the socket-listener effect above: this effect's own
+    // initializedIds guard means each note's canvas is only ever wired up
+    // once, and both functions only touch refs or mutate's functional-
+    // update form, so whichever closure got captured on that first run stays
+    // correct.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [visibleNotes]);
 
 
@@ -957,32 +971,6 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             ))}
         </div>
     )
-
-    // return (
-    //     <ul>
-    //         {notes.map((user) => (
-    //             <li key={user._id}>y: {JSON.stringify(user.position?.y)}
-    //                 x: {<strong>{user.position?.x}</strong>}
-    //             </li>
-    //         ))}
-    //     </ul>
-    // );
 };
 
 export default NoteList;
-
-
-
-
-// function useNote() {
-//     const getNotes = () => fetch('/notes').then(res => res.json())
-//     // const uid = '<note_id>'
-//     const fetcher: Fetcher<Note, string> = (id) => getNotes()
-//     const { data, error, isLoading } = useSWR('', fetcher)
-//     console.log(data)
-//     return {
-//         note: data,
-//         isLoading,
-//         isError: error
-//     }
-// }

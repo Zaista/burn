@@ -6,7 +6,7 @@ export type Note = {
     text: string;
     position: {
         x: number
-        y: any
+        y: number
     };
 };
 

@@ -18,13 +18,13 @@ app.use(express.json());
 await mongoose.connect('mongodb://appuser:apppass@localhost:27017/postit', { authSource: 'postit' });
 
 
+const ROOM_NAME_MAX_LENGTH = 80;
+
 // A room's `_id` doubles as its shareable slug (the token in `/room/:id`
 // URLs). There's no login, so this token IS the access control — anyone
 // with the link can read and edit the room's board, same as an "anyone with
 // the link" Google Doc. It has to be unguessable, not just unique, so it's
 // a random token rather than a sequential/timestamp-based Mongo ObjectId.
-const ROOM_NAME_MAX_LENGTH = 80;
-
 const RoomSchema = new mongoose.Schema({
     _id: String,
     name: { type: String, required: true },

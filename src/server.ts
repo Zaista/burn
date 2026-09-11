@@ -23,8 +23,11 @@ await mongoose.connect('mongodb://appuser:apppass@localhost:27017/postit', { aut
 // with the link can read and edit the room's board, same as an "anyone with
 // the link" Google Doc. It has to be unguessable, not just unique, so it's
 // a random token rather than a sequential/timestamp-based Mongo ObjectId.
+const ROOM_NAME_MAX_LENGTH = 80;
+
 const RoomSchema = new mongoose.Schema({
     _id: String,
+    name: { type: String, required: true },
     createdAt: { type: Date, default: Date.now }
 });
 const Room = mongoose.model('Room', RoomSchema);
@@ -52,10 +55,15 @@ function generateRoomId(): string {
 // 404s below rather than silently creating an empty room, so a typo'd link
 // fails loudly instead of landing on a blank board.
 app.post('/rooms', async (req, res) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, ROOM_NAME_MAX_LENGTH) : '';
+    if (!name) {
+        res.status(400).json({ error: 'Room name is required' });
+        return;
+    }
     let id = generateRoomId();
     while (await Room.exists({ _id: id })) id = generateRoomId(); // astronomically unlikely, guarded anyway
-    await Room.create({ _id: id });
-    res.json({ id });
+    await Room.create({ _id: id, name });
+    res.json({ id, name });
 });
 
 // Lets the frontend confirm a room exists before rendering its board (e.g.
@@ -66,7 +74,7 @@ app.get('/rooms/:id', async (req, res) => {
         res.status(404).json({ error: 'Room not found' });
         return;
     }
-    res.json({ id: room._id });
+    res.json({ id: room._id, name: room.name });
 });
 
 // REST endpoint to get all notes for a single room
@@ -86,6 +94,20 @@ io.on('connection', (socket) => {
         if (socket.data.roomId) socket.leave(socket.data.roomId);
         socket.data.roomId = roomId;
         socket.join(roomId);
+    });
+
+    // A room can be renamed at any time, not just at creation — persist it
+    // and let every other viewer's title update live, the same
+    // live-broadcast pattern as note_text_changed. The name stays mandatory
+    // after creation too, so an empty/whitespace-only rename is ignored
+    // rather than blanking the room out.
+    socket.on('room_rename', async (name: string) => {
+        const roomId = socket.data.roomId;
+        if (!roomId || typeof name !== 'string') return;
+        const trimmed = name.trim().slice(0, ROOM_NAME_MAX_LENGTH);
+        if (!trimmed) return;
+        await Room.findByIdAndUpdate(roomId, { name: trimmed });
+        socket.to(roomId).emit('room_renamed', trimmed);
     });
 
     // `position` is set when a note is created by dragging it off the

@@ -67,7 +67,7 @@ steps:
           echo 'ERROR: _MONGODB_URI substitution is not set on the trigger' >&2
           exit 1
         fi
-        sed -i "s#__MONGODB_URI__#$$MONGODB_URI#" app.yaml
+        sed -i "s|##_MONGODB_URI##|$$MONGODB_URI|" app.yaml
     env:
       - 'MONGODB_URI=${_MONGODB_URI}'
 

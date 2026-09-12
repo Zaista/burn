@@ -11,7 +11,7 @@ export default function Landing() {
     const [name, setName] = useState('');
     const [creating, setCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const { rooms, recordVisit } = useRecentRooms();
+    const { rooms, recordVisit, forgetRoom } = useRecentRooms();
 
     const trimmedName = name.trim();
 
@@ -70,8 +70,24 @@ export default function Landing() {
                     </h2>
                     <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                         {rooms.map((room) => (
-                            <li key={room.id}>
+                            <li key={room.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
                                 <Link to={`/room/${room.id}`}>{room.name}</Link>
+                                <button
+                                    onClick={() => forgetRoom(room.id)}
+                                    aria-label={`Remove ${room.name} from your rooms`}
+                                    title="Remove from this list (the room itself isn't deleted)"
+                                    style={{
+                                        background: 'none',
+                                        border: 'none',
+                                        cursor: 'pointer',
+                                        opacity: 0.5,
+                                        fontSize: '1rem',
+                                        lineHeight: 1,
+                                        padding: '0.2rem 0.4rem',
+                                    }}
+                                >
+                                    ×
+                                </button>
                             </li>
                         ))}
                     </ul>

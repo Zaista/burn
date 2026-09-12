@@ -56,5 +56,17 @@ export function useRecentRooms() {
         });
     }, []);
 
-    return { rooms, recordVisit };
+    // Removes a room from this browser's own list only — purely local
+    // bookkeeping, same as the rest of this hook. The room itself (and its
+    // notes) are untouched on the server; visiting its link again would
+    // just re-add it here via recordVisit.
+    const forgetRoom = useCallback((id: string) => {
+        setRooms(prev => {
+            const next = prev.filter(r => r.id !== id);
+            writeRecentRooms(next);
+            return next;
+        });
+    }, []);
+
+    return { rooms, recordVisit, forgetRoom };
 }

@@ -16,16 +16,13 @@
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
-    "test": "test",
-    "run": "node dist/server.js",
-    "start": "node dist/server.js",
     "build": "tsc",
-    "gcp-build": "tsc",
-    "dev": "npm-run-all --parallel run watch",
     "watch": "tsc --watch",
-    "prerun": "tsc",
+    "start": "node dist/server.js",
+    "backend": "node dist/server.js",
     "frontend": "npm --prefix my-app run dev",
-    "dev:frontend": "npm-run-all --parallel run watch frontend"
+    "dev": "npm-run-all --parallel backend frontend watch",
+    "gcp-build": "tsc"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",

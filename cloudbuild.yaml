@@ -1,0 +1,81 @@
+# Builds and deploys BOTH App Engine services on every push to master:
+#   - frontend (my-app/, static Vite build)      -> `default` service
+#   - backend  (src/, Express + Socket.IO API)   -> `api` service
+# Both redeploy on every trigger run regardless of which one actually
+# changed — fine given how infrequently this ships; each deploy is
+# idempotent.
+#
+# Wire this up to a Cloud Build trigger on push to `master`
+# (config file location: /cloudbuild.yaml), and set a `_MONGODB_URI`
+# substitution variable on that trigger with the real connection string.
+# It's spliced into app.yaml's `__MONGODB_URI__` placeholder at deploy
+# time, so the real value never sits in the repo. Note: a plain trigger
+# substitution like this is visible in the build's logs/history — move it
+# to a Secret Manager-backed secretEnv instead if that's not acceptable.
+#
+# One-time prerequisites this file assumes are already done:
+#   - `gcloud app create --region=...` (App Engine app must already exist)
+#   - the Cloud Build service account has roles/appengine.appAdmin,
+#     roles/iam.serviceAccountUser, and roles/storage.admin
+
+substitutions:
+  _MONGODB_URI: "" # real value comes from the trigger config; empty here just avoids a hard failure on an ad-hoc manual build
+
+steps:
+  # ---------------- frontend: my-app/ -> default service ----------------
+  - id: frontend-install
+    name: 'gcr.io/cloud-builders/npm'
+    dir: 'my-app'
+    args: ['ci']
+
+  - id: frontend-build
+    name: 'gcr.io/cloud-builders/npm'
+    dir: 'my-app'
+    args: ['run', 'build']
+    env:
+      # Baked into the built JS bundle (see my-app/src/config.ts).
+      # ${PROJECT_ID} is a Cloud Build built-in substitution — no trigger
+      # config needed for this one.
+      - 'VITE_API_BASE_URL=https://api-dot-${PROJECT_ID}.appspot.com'
+
+  - id: frontend-deploy
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args: ['app', 'deploy', 'my-app/app.yaml', '--quiet']
+
+  # ---------------- backend: src/ -> api service ----------------
+  - id: backend-install
+    name: 'gcr.io/cloud-builders/npm'
+    args: ['ci']
+
+  # Fails the build here (before touching App Engine) if the TypeScript
+  # doesn't compile. App Engine's own buildpack also runs this via the
+  # `gcp-build` script during `gcloud app deploy`, so this step is mainly
+  # fast feedback.
+  - id: backend-build
+    name: 'gcr.io/cloud-builders/npm'
+    args: ['run', 'build']
+
+  - id: backend-render-config
+    name: 'gcr.io/cloud-builders/npm'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        if [ -z "$MONGODB_URI" ]; then
+          echo 'ERROR: _MONGODB_URI substitution is not set on the trigger' >&2
+          exit 1
+        fi
+        sed -i "s#__MONGODB_URI__#$MONGODB_URI#" app.yaml
+    env:
+      - 'MONGODB_URI=${_MONGODB_URI}'
+
+  - id: backend-deploy
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args: ['app', 'deploy', 'app.yaml', '--quiet']
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 2400s

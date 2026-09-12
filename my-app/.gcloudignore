@@ -1,0 +1,19 @@
+.gcloudignore
+.git
+.gitignore
+node_modules/
+src/
+public/
+.env*
+*.local
+README.md
+eslint.config.js
+vite.config.js
+tsconfig*.json
+index.html
+
+# NOTE: deliberately does NOT include .gitignore's patterns (gcloud's
+# auto-generated default would via `#!include:.gitignore`) — .gitignore
+# excludes dist/ since it's a build artifact, but dist/ is exactly what
+# this deploy needs to upload (built by cloudbuild.yaml's frontend-build
+# step before `gcloud app deploy my-app/app.yaml` runs).

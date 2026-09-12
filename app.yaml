@@ -1,0 +1,62 @@
+# GCP App Engine config for the backend (Express + Socket.IO API server in
+# src/server.ts, compiled to dist/). Deployed as the named `api` service —
+# see my-app/app.yaml for the frontend, which takes the `default` service
+# so shared room links resolve at the bare *.appspot.com domain. This
+# backend is then reachable at https://api-dot-PROJECT_ID.appspot.com.
+#
+# Flexible environment (not Standard) because Socket.IO needs long-lived
+# WebSocket connections and Standard's request model doesn't support that
+# well.
+runtime: nodejs
+env: flex
+service: api
+
+runtime_config:
+  operating_system: "ubuntu22"
+  runtime_version: "20"
+
+# App Engine's Node.js buildpack runs `npm install` then the `gcp-build`
+# script (added in package.json -> `tsc`) to produce dist/, then `npm start`
+# (-> `node dist/server.js`).
+
+env_variables:
+  NODE_ENV: "production"
+  # Placeholder — cloudbuild.yaml's backend-render-config step replaces
+  # this with the real connection string from the trigger's `_MONGODB_URI`
+  # substitution before deploying, so the actual value never sits in the
+  # repo. If deploying by hand (no Cloud Build), sed this yourself first,
+  # or pass an already-rendered copy of this file to `gcloud app deploy`.
+  MONGODB_URI: "__MONGODB_URI__"
+
+resources:
+  cpu: 1
+  memory_gb: 0.5
+  disk_size_gb: 10
+
+network:
+  # Pin each client to the same instance for the life of its connection —
+  # needed so a Socket.IO connection (and its polling-transport fallback
+  # requests) keep landing on the instance that holds it.
+  session_affinity: true
+
+automatic_scaling:
+  min_num_instances: 1
+  max_num_instances: 4
+  cool_down_period_sec: 120
+  cpu_utilization:
+    target_utilization: 0.6
+
+liveness_check:
+  path: "/healthz"
+  check_interval_sec: 30
+  timeout_sec: 4
+  failure_threshold: 4
+  success_threshold: 2
+
+readiness_check:
+  path: "/healthz"
+  check_interval_sec: 5
+  timeout_sec: 4
+  failure_threshold: 2
+  success_threshold: 2
+  app_start_timeout_sec: 300

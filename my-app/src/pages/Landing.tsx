@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useRecentRooms } from '../hooks/useRecentRooms';
-
-const API_BASE = 'http://localhost:3000';
+import { API_BASE_URL } from '../config';
 
 // The only way a room comes into existence — POSTs to the server for a
 // fresh unguessable id, then navigates straight into it. Sharing that room
@@ -24,7 +23,7 @@ export default function Landing() {
         setCreating(true);
         setError(null);
         try {
-            const res = await fetch(`${API_BASE}/rooms`, {
+            const res = await fetch(`${API_BASE_URL}/rooms`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: trimmedName }),

@@ -18,6 +18,9 @@
   "scripts": {
     "test": "test",
     "run": "node dist/server.js",
+    "start": "node dist/server.js",
+    "build": "tsc",
+    "gcp-build": "tsc",
     "dev": "npm-run-all --parallel run watch",
     "watch": "tsc --watch",
     "prerun": "tsc",

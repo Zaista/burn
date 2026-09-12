@@ -17,8 +17,8 @@ app.use(express.json());
 // Connect to MongoDB. In production (e.g. App Engine) this should point at
 // an externally-reachable Mongo (Atlas, or a Compute Engine box) via the
 // MONGODB_URI env var — App Engine instances can't reach `localhost:27017`.
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://appuser:apppass@localhost:27017/postit';
-await mongoose.connect(MONGODB_URI, { authSource: 'postit' });
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://burn:burn@localhost:27017/burn';
+await mongoose.connect(MONGODB_URI, { authSource: 'admin' });
 
 // Used by App Engine's liveness/readiness checks (see app.yaml).
 app.get('/healthz', (_req, res) => {

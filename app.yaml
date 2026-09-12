@@ -1,19 +1,19 @@
 # GCP App Engine config for the backend (Express + Socket.IO API server in
-# src/server.ts, compiled to dist/). Deployed as the named `api` service —
-# see my-app/app.yaml for the frontend, which takes the `default` service
-# so shared room links resolve at the bare *.appspot.com domain. This
-# backend is then reachable at https://api-dot-PROJECT_ID.appspot.com.
+# src/server.ts, compiled to dist/). Deployed as the named `burn-backend`
+# service — see my-app/app.yaml for the frontend (`burn-frontend` service).
+# Neither is `default` since that's already this project's portfolio site.
+# This backend is reachable at https://burn-backend-dot-PROJECT_ID.appspot.com.
 #
 # Flexible environment (not Standard) because Socket.IO needs long-lived
 # WebSocket connections and Standard's request model doesn't support that
 # well.
 runtime: nodejs
 env: flex
-service: burn
+service: burn-backend
 
 runtime_config:
-  operating_system: "ubuntu22"
-  runtime_version: "20"
+  operating_system: "ubuntu24"
+  runtime_version: "24"
 
 # App Engine's Node.js buildpack runs `npm install` then the `gcp-build`
 # script (added in package.json -> `tsc`) to produce dist/, then `npm start`

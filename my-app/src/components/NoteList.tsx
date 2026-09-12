@@ -34,6 +34,39 @@ type Ember = { x: number; y: number; vx: number; vy: number; size: number; life:
 const isPlaced = (note: Note): boolean =>
     typeof note.position?.x === 'number' && typeof note.position?.y === 'number';
 
+// Notes are a fixed 200x200px on every device, but positions are
+// stored/broadcast as fractions of the viewport (0..1ish) — the coal is
+// always dead-center via `left/top: 50%` regardless of screen size, so a
+// note saved as an absolute pixel offset from one device's viewport lands
+// nowhere near the coal on a very differently-sized one.
+//
+// Critically, the fraction has to be of the note's CENTER, not its
+// top-left corner: the note's fixed half-width/height offset from center
+// doesn't scale with the viewport, so converting the corner directly
+// still drifts badly between very differently-sized screens. E.g. a note
+// centered on a 375px-wide phone's coal (top-left x=87.5) converts,
+// corner-first, to x=336 on a 1440px desktop — nowhere near that desktop
+// coal's own center at x=720. Converting the CENTER (x=187.5 -> fraction
+// 0.5, same as the coal's own 50%) lands exactly on x=720 instead.
+const NOTE_SIZE = 200;
+const topLeftToCenterFraction = (topLeftPx: number, dimension: number): number =>
+    (topLeftPx + NOTE_SIZE / 2) / dimension;
+const centerFractionToTopLeft = (fraction: number, dimension: number): number =>
+    fraction * dimension - NOTE_SIZE / 2;
+
+// A note saved before positions became fractions has a raw top-left pixel
+// value instead (typically in the hundreds) — a real fraction is
+// essentially never this large. Treat anything past a sane fraction range
+// as that legacy format and use it as-is (it's already a top-left px, no
+// center adjustment needed) rather than reinterpreting it as a fraction;
+// the first time anyone drags that note, it's silently re-saved in the
+// new format (see setNotePosition).
+const LEGACY_PIXEL_THRESHOLD = 3;
+const notePositionToPixels = (position: { x: number; y: number }) => ({
+    left: Math.abs(position.x) > LEGACY_PIXEL_THRESHOLD ? position.x : centerFractionToTopLeft(position.x, window.innerWidth),
+    top: Math.abs(position.y) > LEGACY_PIXEL_THRESHOLD ? position.y : centerFractionToTopLeft(position.y, window.innerHeight),
+});
+
 const STACK_OFFSET_STEP = 6; // fan spacing shared by both stacks below
 
 // The corner dispenser: a fixed, never-shrinking pile of blank notes. It
@@ -470,19 +503,20 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         const coal = coalRef.current;
         if (!coal) return false;
         const coalBox = coal.getBoundingClientRect();
-        return x < coalBox.right && x + 200 > coalBox.left && y < coalBox.bottom && y + 200 > coalBox.top;
+        return x < coalBox.right && x + NOTE_SIZE > coalBox.left && y < coalBox.bottom && y + NOTE_SIZE > coalBox.top;
     };
 
-    // Moves a note's canvas to an absolute screen position, and remembers it
-    // in the SWR cache so a later re-render (or a page you didn't drag on)
-    // doesn't put it back in the stack.
-    const setNotePosition = (id: string, x: number, y: number) => {
+    // Moves a note's canvas to its position (given as a viewport fraction —
+    // see notePositionToPixels), and remembers it in the SWR cache so a
+    // later re-render (or a page you didn't drag on) doesn't put it back in
+    // the stack.
+    const setNotePosition = (id: string, fx: number, fy: number) => {
         const canvas = canvasRefs.current[id];
         if (canvas) {
-            canvas.style.left = `${x}px`;
-            canvas.style.top = `${y}px`;
+            canvas.style.left = `${centerFractionToTopLeft(fx, window.innerWidth)}px`;
+            canvas.style.top = `${centerFractionToTopLeft(fy, window.innerHeight)}px`;
         }
-        mutate(current => current?.map(n => (n._id === id ? { ...n, position: { x, y } } : n)), {
+        mutate(current => current?.map(n => (n._id === id ? { ...n, position: { x: fx, y: fy } } : n)), {
             revalidate: false,
         });
     };
@@ -705,8 +739,8 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         const onDragging = ({ id, x, y }: { id: string; x: number; y: number }) => {
             const canvas = canvasRefs.current[id];
             if (canvas) {
-                canvas.style.left = `${x}px`;
-                canvas.style.top = `${y}px`;
+                canvas.style.left = `${centerFractionToTopLeft(x, window.innerWidth)}px`;
+                canvas.style.top = `${centerFractionToTopLeft(y, window.innerHeight)}px`;
                 bringToFront(canvas); // another client just grabbed/moved this one — keep the "last touched" ordering in sync
             }
         };
@@ -822,7 +856,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                 }, 4000);
                 socket.emit('addNote', {
                     text: '',
-                    position: { x: dropX, y: dropY },
+                    position: { x: topLeftToCenterFraction(dropX, window.innerWidth), y: topLeftToCenterFraction(dropY, window.innerHeight) },
                     ignite: isOverCoal(dropX, dropY),
                     clientToken: token,
                 });
@@ -850,8 +884,9 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             canvas.style.position = 'fixed';
             canvas.style.touchAction = 'none'; // don't let touch-scroll fight the drag
             if (isPlaced(note)) {
-                canvas.style.left = `${note.position.x}px`;
-                canvas.style.top = `${note.position.y}px`;
+                const { left, top } = notePositionToPixels(note.position);
+                canvas.style.left = `${left}px`;
+                canvas.style.top = `${top}px`;
             } else {
                 // Legacy fallback — new notes always come from the
                 // dispenser with a position already set, so this only
@@ -903,7 +938,10 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                 canvas.style.left = `${x}px`;
                 canvas.style.top = `${y}px`;
                 // Live position only — no DB write here, too frequent (see server).
-                socket.emit('note_dragging', { id: note._id, x, y });
+                // Sent as a center-relative viewport fraction (see
+                // topLeftToCenterFraction) so it lands in the right spot
+                // on a differently-sized screen, not just this one.
+                socket.emit('note_dragging', { id: note._id, x: topLeftToCenterFraction(x, window.innerWidth), y: topLeftToCenterFraction(y, window.innerHeight) });
             };
 
             canvas.onpointerup = (e) => {
@@ -918,8 +956,10 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                     triggerBurn(note._id, true);
                     return;
                 }
-                socket.emit('note_drag_end', { id: note._id, x, y });
-                setNotePosition(note._id, x, y);
+                const fx = topLeftToCenterFraction(x, window.innerWidth);
+                const fy = topLeftToCenterFraction(y, window.innerHeight);
+                socket.emit('note_drag_end', { id: note._id, x: fx, y: fy });
+                setNotePosition(note._id, fx, fy);
             };
         })
 

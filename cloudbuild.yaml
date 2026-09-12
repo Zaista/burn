@@ -20,7 +20,7 @@
 #     roles/iam.serviceAccountUser, and roles/storage.admin
 
 substitutions:
-  _MONGODB_URI: ${_MONGODB_URI}
+  _MONGODB_URI: "" # real value comes from the trigger config; empty here just avoids a hard failure on an ad-hoc manual build
 
 steps:
   # ---------------- frontend: my-app/ -> burn-frontend service ----------------
@@ -63,11 +63,35 @@ steps:
     args:
       - '-c'
       - |
-        if [ -z "${_MONGODB_URI}" ]; then
+        if [ -z "$$MONGODB_URI" ]; then
           echo 'ERROR: _MONGODB_URI substitution is not set on the trigger' >&2
           exit 1
         fi
-        sed -i "s|##_MONGODB_URI##|${_MONGODB_URI}|" app.yaml
+        # Prints only a safe prefix + total length, never the full value,
+        # so a bad substitution (wrong scheme, stray quotes, truncation)
+        # shows up in the build log without leaking the secret.
+        echo "MONGODB_URI starts with '$${MONGODB_URI:0:14}' ($${#MONGODB_URI} chars total)"
+        # A plain sed replacement is unsafe here: sed's replacement text
+        # treats an unescaped `&` as "insert the matched pattern", and a
+        # Mongo URI (or its password) can easily contain `&` - e.g. the
+        # standard Atlas suffix ?retryWrites=true&w=majority, or a
+        # generated password. That silently corrupts it mid-string,
+        # which is almost certainly why auth just failed. Node's
+        # String.replace with a replacer FUNCTION (as opposed to a
+        # replacement string, which has its own `$&`/`$$` special cases)
+        # inserts the value verbatim regardless of what characters it
+        # contains.
+        node -e "
+          const fs = require('fs');
+          const path = 'app.yaml';
+          const uri = process.env.MONGODB_URI;
+          const content = fs.readFileSync(path, 'utf8');
+          if (!content.includes('##_MONGODB_URI##')) {
+            console.error('ERROR: ##_MONGODB_URI## placeholder not found in app.yaml');
+            process.exit(1);
+          }
+          fs.writeFileSync(path, content.replace('##_MONGODB_URI##', () => uri));
+        "
     env:
       - 'MONGODB_URI=${_MONGODB_URI}'
 

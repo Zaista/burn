@@ -9,7 +9,7 @@
 # well.
 runtime: nodejs
 env: flex
-service: api
+service: burn
 
 runtime_config:
   operating_system: "ubuntu22"
@@ -26,7 +26,7 @@ env_variables:
   # substitution before deploying, so the actual value never sits in the
   # repo. If deploying by hand (no Cloud Build), sed this yourself first,
   # or pass an already-rendered copy of this file to `gcloud app deploy`.
-  MONGODB_URI: "__MONGODB_URI__"
+  MONGODB_URI: ##_MONGODB_URI##
 
 resources:
   cpu: 1

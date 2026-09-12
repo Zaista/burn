@@ -1,6 +1,7 @@
 # Builds and deploys BOTH App Engine services on every push to master:
-#   - frontend (my-app/, static Vite build)      -> `default` service
-#   - backend  (src/, Express + Socket.IO API)   -> `api` service
+#   - frontend (my-app/, static Vite build)      -> `burn-frontend` service
+#   - backend  (src/, Express + Socket.IO API)   -> `burn-backend` service
+# (neither is `default` — that's already this project's portfolio site)
 # Both redeploy on every trigger run regardless of which one actually
 # changed — fine given how infrequently this ships; each deploy is
 # idempotent.
@@ -22,7 +23,7 @@ substitutions:
   _MONGODB_URI: "" # real value comes from the trigger config; empty here just avoids a hard failure on an ad-hoc manual build
 
 steps:
-  # ---------------- frontend: my-app/ -> default service ----------------
+  # ---------------- frontend: my-app/ -> burn-frontend service ----------------
   - id: frontend-install
     name: 'gcr.io/cloud-builders/npm'
     dir: 'my-app'
@@ -36,14 +37,14 @@ steps:
       # Baked into the built JS bundle (see my-app/src/config.ts).
       # ${PROJECT_ID} is a Cloud Build built-in substitution — no trigger
       # config needed for this one.
-      - 'VITE_API_BASE_URL=https://api-dot-${PROJECT_ID}.appspot.com'
+      - 'VITE_API_BASE_URL=https://burn-backend-dot-${PROJECT_ID}.appspot.com'
 
   - id: frontend-deploy
     name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args: ['app', 'deploy', 'my-app/app.yaml', '--quiet']
 
-  # ---------------- backend: src/ -> api service ----------------
+  # ---------------- backend: src/ -> burn-backend service ----------------
   - id: backend-install
     name: 'gcr.io/cloud-builders/npm'
     args: ['ci']

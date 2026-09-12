@@ -20,7 +20,7 @@
 #     roles/iam.serviceAccountUser, and roles/storage.admin
 
 substitutions:
-  _MONGODB_URI: "" # real value comes from the trigger config; empty here just avoids a hard failure on an ad-hoc manual build
+  _MONGODB_URI: ${_MONGODB_URI}
 
 steps:
   # ---------------- frontend: my-app/ -> burn-frontend service ----------------
@@ -63,11 +63,11 @@ steps:
     args:
       - '-c'
       - |
-        if [ -z "$$MONGODB_URI" ]; then
+        if [ -z "${_MONGODB_URI}" ]; then
           echo 'ERROR: _MONGODB_URI substitution is not set on the trigger' >&2
           exit 1
         fi
-        sed -i "s|##_MONGODB_URI##|$$MONGODB_URI|" app.yaml
+        sed -i "s|##_MONGODB_URI##|${_MONGODB_URI}|" app.yaml
     env:
       - 'MONGODB_URI=${_MONGODB_URI}'
 

@@ -6,14 +6,23 @@ src/
 public/
 .env*
 *.local
-README.md
-eslint.config.js
-vite.config.js
-tsconfig*.json
-index.html
+/README.md
+/eslint.config.js
+/vite.config.js
+/tsconfig*.json
+/index.html
 
-# NOTE: deliberately does NOT include .gitignore's patterns (gcloud's
+# NOTE: every source-file pattern above is anchored with a leading `/` so
+# it only matches that file at the repo root — a bare `index.html` (no
+# leading slash) matches ANY file with that name anywhere in the tree,
+# which was silently excluding dist/index.html too (the actual build
+# output this deploy needs to upload, built by cloudbuild.yaml's
+# frontend-build step). Same reasoning as the `gcp-build` no-op script
+# in package.json: this deploy ships a prebuilt dist/ rather than
+# letting App Engine's own buildpack rebuild it (which would run
+# without VITE_API_BASE_URL set).
+#
+# Deliberately does NOT include .gitignore's patterns (gcloud's
 # auto-generated default would via `#!include:.gitignore`) — .gitignore
 # excludes dist/ since it's a build artifact, but dist/ is exactly what
-# this deploy needs to upload (built by cloudbuild.yaml's frontend-build
-# step before `gcloud app deploy my-app/app.yaml` runs).
+# needs to ship here.

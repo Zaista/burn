@@ -1,5 +1,6 @@
 // hooks/useNotes.ts
 import useSWR from 'swr';
+import { API_BASE_URL } from '../config';
 
 export type Note = {
     _id: string;
@@ -17,7 +18,7 @@ const fetcher = (url: string) => fetch(url).then((res) => {
 
 export function useNotes(roomId: string) {
     const { data, error, isLoading, mutate } = useSWR<Note[]>(
-        roomId ? `http://localhost:3000/rooms/${roomId}/notes` : null,
+        roomId ? `${API_BASE_URL}/rooms/${roomId}/notes` : null,
         fetcher
     );
 

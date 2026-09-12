@@ -6,8 +6,7 @@ import ShareLink from '../components/ShareLink';
 import RoomTitle from '../components/RoomTitle';
 import HomeButton from '../components/HomeButton';
 import { useRecentRooms } from '../hooks/useRecentRooms';
-
-const API_BASE = 'http://localhost:3000';
+import { API_BASE_URL } from '../config';
 
 type RoomInfo = { id: string; name: string };
 
@@ -21,7 +20,7 @@ const fetcher = (url: string) => fetch(url).then((res) => {
 // an empty board (rooms only ever get created via Landing's "Create a room").
 export default function RoomPage() {
     const { roomId } = useParams<{ roomId: string }>();
-    const { data, error, isLoading } = useSWR<RoomInfo>(roomId ? `${API_BASE}/rooms/${roomId}` : null, fetcher);
+    const { data, error, isLoading } = useSWR<RoomInfo>(roomId ? `${API_BASE_URL}/rooms/${roomId}` : null, fetcher);
     const { recordVisit } = useRecentRooms();
 
     // Only fires once the room is confirmed to exist (data.name is unset

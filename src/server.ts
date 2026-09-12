@@ -14,9 +14,16 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// Connect to MongoDB
-await mongoose.connect('mongodb://appuser:apppass@localhost:27017/postit', { authSource: 'postit' });
+// Connect to MongoDB. In production (e.g. App Engine) this should point at
+// an externally-reachable Mongo (Atlas, or a Compute Engine box) via the
+// MONGODB_URI env var — App Engine instances can't reach `localhost:27017`.
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://appuser:apppass@localhost:27017/postit';
+await mongoose.connect(MONGODB_URI, { authSource: 'postit' });
 
+// Used by App Engine's liveness/readiness checks (see app.yaml).
+app.get('/healthz', (_req, res) => {
+    res.status(mongoose.connection.readyState === 1 ? 200 : 503).send('ok');
+});
 
 const ROOM_NAME_MAX_LENGTH = 80;
 

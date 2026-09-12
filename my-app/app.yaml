@@ -1,0 +1,30 @@
+# GCP App Engine config for the frontend (static Vite build in dist/,
+# rebuilt by cloudbuild.yaml before this deploy). Deployed as the App
+# Engine `default` service, so shared room links
+# (https://PROJECT_ID.appspot.com/room/:id) resolve here. The API backend
+# is a separate named service — see ../app.yaml — reachable at
+# https://api-dot-PROJECT_ID.appspot.com; that URL is baked into the build
+# via VITE_API_BASE_URL (see src/config.ts).
+runtime: nodejs20
+env: standard
+service: default
+
+# Every route is served as a static file directly by App Engine's routing
+# layer, without ever invoking application code — the `start` script
+# below (see package.json) only exists as a fallback for whatever the
+# standard Node runtime's own startup check may need.
+handlers:
+  - url: /assets
+    static_dir: dist/assets
+    secure: always
+
+  # SPA fallback: anything else (/, /room/:id, a hard refresh mid-route)
+  # gets index.html and react-router takes over client-side.
+  - url: /.*
+    static_files: dist/index.html
+    upload: dist/index.html
+    secure: always
+
+automatic_scaling:
+  min_instances: 0
+  max_instances: 2

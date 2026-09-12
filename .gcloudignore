@@ -1,0 +1,14 @@
+.gcloudignore
+.git
+.gitignore
+.idea
+.claude
+
+# This app.yaml/cloudbuild.yaml pair deploys the backend only (src/ ->
+# dist/, compiled during App Engine's build via the gcp-build script).
+# The my-app/ frontend is a separate deployable and isn't needed here.
+my-app/
+private/
+node_modules/
+dist/
+*.md

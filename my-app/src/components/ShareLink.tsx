@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 
 // Sharing a room is just sharing its URL — there's no invite flow, the link
 // itself grants access. This just saves a manual copy from the address bar.
-// Unstyled for position: sits in the top-right toolbar alongside HomeButton
-// (see RoomPage).
+// Unstyled for position: rendered inside HeaderMenu's dropdown, alongside
+// HomeButton.
 export default function ShareLink() {
     const [copied, setCopied] = useState(false);
 

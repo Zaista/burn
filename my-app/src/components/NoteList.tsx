@@ -8,6 +8,23 @@ import coalUrl from '../assets/coal.png';
 // Notes are 200x200 — a bit smaller reads as roughly 80% of that.
 const COAL_SIZE = 160;
 
+// The board is laid out in a fixed logical size — roughly a typical laptop
+// screen — instead of whatever the actual device's viewport happens to be.
+// Every position (coal, dispenser, notes) is computed in these board-local
+// pixels, and the whole board is then rendered inside a container of exactly
+// this size that gets CSS-scaled (uniformly, so it never distorts) to fit
+// the real viewport — see the `scale` state in NoteList. A laptop/desktop
+// viewport close to this size ends up at ~1:1 scale, i.e. looks exactly like
+// it always has; a phone just gets a small, fully zoomed-out view of the
+// same board, which the user can pinch-zoom into. This is what makes two
+// different screens agree on "the same distance from the coal": that used
+// to be a fraction of each device's own (differently sized) viewport, so it
+// was only ever the same *relative* to that device's screen. Fractions are
+// now taken against these fixed dimensions instead, so they mean the same
+// absolute board position everywhere.
+const BOARD_WIDTH = 1440;
+const BOARD_HEIGHT = 900;
+
 // Small pre-rendered glow used for every ember particle, so a frame only ever
 // needs a cheap drawImage() instead of building a radial gradient per-particle.
 let emberSprite: HTMLCanvasElement | null = null;
@@ -34,20 +51,20 @@ type Ember = { x: number; y: number; vx: number; vy: number; size: number; life:
 const isPlaced = (note: Note): boolean =>
     typeof note.position?.x === 'number' && typeof note.position?.y === 'number';
 
-// Notes are a fixed 200x200px on every device, but positions are
-// stored/broadcast as fractions of the viewport (0..1ish) — the coal is
-// always dead-center via `left/top: 50%` regardless of screen size, so a
-// note saved as an absolute pixel offset from one device's viewport lands
-// nowhere near the coal on a very differently-sized one.
+// Notes are a fixed 200x200 board-local px, and positions are
+// stored/broadcast as fractions (0..1ish) of the fixed BOARD_WIDTH/
+// BOARD_HEIGHT — never of the real device's viewport, which is what used to
+// make a note saved on one screen land somewhere else entirely on a very
+// differently-sized one (see BOARD_WIDTH's comment above).
 //
 // Critically, the fraction has to be of the note's CENTER, not its
 // top-left corner: the note's fixed half-width/height offset from center
-// doesn't scale with the viewport, so converting the corner directly
-// still drifts badly between very differently-sized screens. E.g. a note
-// centered on a 375px-wide phone's coal (top-left x=87.5) converts,
-// corner-first, to x=336 on a 1440px desktop — nowhere near that desktop
-// coal's own center at x=720. Converting the CENTER (x=187.5 -> fraction
-// 0.5, same as the coal's own 50%) lands exactly on x=720 instead.
+// doesn't scale the way a fraction does, so converting the corner directly
+// still drifts. E.g. a note centered on the board (top-left x=620) converts,
+// corner-first, to fraction 620/1440=0.43 — re-expanded on another board
+// size that's no longer anywhere near center. Converting the CENTER
+// (x=720 -> fraction 0.5, same as the coal's own 50%) is exact regardless
+// of board size.
 const NOTE_SIZE = 200;
 const topLeftToCenterFraction = (topLeftPx: number, dimension: number): number =>
     (topLeftPx + NOTE_SIZE / 2) / dimension;
@@ -63,8 +80,8 @@ const centerFractionToTopLeft = (fraction: number, dimension: number): number =>
 // new format (see setNotePosition).
 const LEGACY_PIXEL_THRESHOLD = 3;
 const notePositionToPixels = (position: { x: number; y: number }) => ({
-    left: Math.abs(position.x) > LEGACY_PIXEL_THRESHOLD ? position.x : centerFractionToTopLeft(position.x, window.innerWidth),
-    top: Math.abs(position.y) > LEGACY_PIXEL_THRESHOLD ? position.y : centerFractionToTopLeft(position.y, window.innerHeight),
+    left: Math.abs(position.x) > LEGACY_PIXEL_THRESHOLD ? position.x : centerFractionToTopLeft(position.x, BOARD_WIDTH),
+    top: Math.abs(position.y) > LEGACY_PIXEL_THRESHOLD ? position.y : centerFractionToTopLeft(position.y, BOARD_HEIGHT),
 });
 
 const STACK_OFFSET_STEP = 6; // fan spacing shared by both stacks below
@@ -86,6 +103,31 @@ const LEGACY_STACK_ORIGIN = { x: 20, y: 20 + 200 + DISPENSER_COUNT * STACK_OFFSE
 // hand that isn't perfectly still while clicking would accidentally start
 // dragging.
 const DRAG_THRESHOLD = 4;
+
+// The coal always sits dead-center of the board (see the <img> below, which
+// is centered with left/top: 50%) — computed once in board-local pixels so
+// hit-testing (isOverCoal, the ignition point in triggerBurn) never needs to
+// measure the actual rendered DOM, which would otherwise have to account for
+// the board's CSS scale (see `scale` below) to get back to board-local px.
+const COAL_BOX = {
+    left: BOARD_WIDTH / 2 - COAL_SIZE / 2,
+    top: BOARD_HEIGHT / 2 - COAL_SIZE / 2,
+    right: BOARD_WIDTH / 2 + COAL_SIZE / 2,
+    bottom: BOARD_HEIGHT / 2 + COAL_SIZE / 2,
+};
+
+// How much to uniformly shrink (or, capped at 1, never grow) the fixed
+// BOARD_WIDTH x BOARD_HEIGHT board to "contain"-fit the real viewport —
+// scaling both axes by the same factor is what keeps distances and angles
+// on the board identical everywhere, instead of the old per-axis viewport
+// fraction, which stretched x and y independently and distorted them. A
+// laptop/desktop viewport at or above the board's own size gets scale 1,
+// i.e. today's exact look; a phone gets a small, fully-visible, pinch-
+// zoomable view of the same board.
+function computeScale(): number {
+    if (typeof window === 'undefined') return 1;
+    return Math.min(1, window.innerWidth / BOARD_WIDTH, window.innerHeight / BOARD_HEIGHT);
+}
 
 // Loaded once and reused for every note — was a fresh `new Image()` per
 // paintNote() call, so rapid successive redraws (e.g. live-typing sync
@@ -463,7 +505,26 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
     const burningIds = useRef<Set<string>>(new Set());
     const stackSlots = useRef(0);
     const dispenserRefs = useRef<(HTMLCanvasElement | null)[]>([]);
-    const coalRef = useRef<HTMLImageElement | null>(null);
+    // How much the fixed-size board is currently scaled down (or, capped at
+    // 1, not scaled at all) to fit the real viewport — see computeScale.
+    // Kept as both state (so the board container's inline transform style
+    // re-renders on change) and a ref (so pointer handlers set up once per
+    // note, per the initializedIds guard below, always read the *current*
+    // scale instead of whatever it was when that note's canvas was wired up).
+    const [scale, setScale] = useState<number>(computeScale);
+    const scaleRef = useRef(scale);
+    useEffect(() => {
+        scaleRef.current = scale;
+    }, [scale]);
+    useEffect(() => {
+        const onResize = () => setScale(computeScale());
+        window.addEventListener('resize', onResize);
+        window.addEventListener('orientationchange', onResize);
+        return () => {
+            window.removeEventListener('resize', onResize);
+            window.removeEventListener('orientationchange', onResize);
+        };
+    }, []);
     // Ids of notes that arrived with an `ignite` flag (created directly on
     // the coal) — consumed once that note's canvas has actually painted
     // itself, since starting the burn any earlier would snapshot a blank
@@ -496,25 +557,24 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
     const notesRef = useRef<Note[] | undefined>(notes);
     notesRef.current = notes;
 
-    // Whether a note dropped with its top-left at (x, y) — it's always
-    // 200x200 — overlaps the coal image, i.e. it's been "placed on the
+    // Whether a note dropped with its board-local top-left at (x, y) — it's
+    // always 200x200 — overlaps the coal, i.e. it's been "placed on the
     // coal" and should start burning instead of just staying put there.
-    const isOverCoal = (x: number, y: number): boolean => {
-        const coal = coalRef.current;
-        if (!coal) return false;
-        const coalBox = coal.getBoundingClientRect();
-        return x < coalBox.right && x + NOTE_SIZE > coalBox.left && y < coalBox.bottom && y + NOTE_SIZE > coalBox.top;
-    };
+    // Compared against the constant, board-local COAL_BOX rather than a
+    // measured DOM rect so this stays correct regardless of the board's
+    // current CSS scale (see `scale` above).
+    const isOverCoal = (x: number, y: number): boolean =>
+        x < COAL_BOX.right && x + NOTE_SIZE > COAL_BOX.left && y < COAL_BOX.bottom && y + NOTE_SIZE > COAL_BOX.top;
 
-    // Moves a note's canvas to its position (given as a viewport fraction —
+    // Moves a note's canvas to its position (given as a board fraction —
     // see notePositionToPixels), and remembers it in the SWR cache so a
     // later re-render (or a page you didn't drag on) doesn't put it back in
     // the stack.
     const setNotePosition = (id: string, fx: number, fy: number) => {
         const canvas = canvasRefs.current[id];
         if (canvas) {
-            canvas.style.left = `${centerFractionToTopLeft(fx, window.innerWidth)}px`;
-            canvas.style.top = `${centerFractionToTopLeft(fy, window.innerHeight)}px`;
+            canvas.style.left = `${centerFractionToTopLeft(fx, BOARD_WIDTH)}px`;
+            canvas.style.top = `${centerFractionToTopLeft(fy, BOARD_HEIGHT)}px`;
         }
         mutate(current => current?.map(n => (n._id === id ? { ...n, position: { x: fx, y: fy } } : n)), {
             revalidate: false,
@@ -549,15 +609,25 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         const originalText = notesRef.current?.find(n => n._id === id)?.text ?? '';
         const box = canvas.getBoundingClientRect();
 
-        const availableWidth = box.width - TEXT_PADDING * 2;
-        const availableHeight = box.height - TEXT_PADDING * 2;
+        // box is in real screen pixels — already scaled down/up by the
+        // board's current CSS scale (see `scale` above) — but TEXT_PADDING/
+        // TEXT_MAX_FONT_SIZE are board-local (canvas buffer) constants, so
+        // this overlay textarea (a real DOM element, unlike the canvas
+        // itself, has no separate "buffer" to auto-scale) needs its own
+        // padding/font scaled to match however small or large the note is
+        // currently rendering on screen.
+        const editScale = scaleRef.current;
+        const padding = TEXT_PADDING * editScale;
+        const fontSize = TEXT_MAX_FONT_SIZE * editScale;
+        const availableWidth = box.width - padding * 2;
+        const availableHeight = box.height - padding * 2;
 
         const textarea = document.createElement('textarea');
         textarea.value = originalText;
         Object.assign(textarea.style, {
             position: 'fixed',
-            left: `${box.left + TEXT_PADDING}px`,
-            top: `${box.top + TEXT_PADDING}px`,
+            left: `${box.left + padding}px`,
+            top: `${box.top + padding}px`,
             width: `${availableWidth}px`,
             height: `${availableHeight}px`,
             zIndex: String(++zCounter.current),
@@ -567,7 +637,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             overflowY: 'hidden',
             background: 'transparent',
             textAlign: 'center',
-            font: `${TEXT_MAX_FONT_SIZE}px ${TEXT_FONT_FAMILY}`,
+            font: `${fontSize}px ${TEXT_FONT_FAMILY}`,
             color: TEXT_COLOR,
             boxSizing: 'border-box',
         });
@@ -597,9 +667,9 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         const measureCtx = canvas.getContext('2d');
         const updateVerticalCentering = () => {
             if (!measureCtx) return;
-            measureCtx.font = `${TEXT_MAX_FONT_SIZE}px ${TEXT_FONT_FAMILY}`;
+            measureCtx.font = `${fontSize}px ${TEXT_FONT_FAMILY}`;
             const lines = wrapText(measureCtx, textarea.value || ' ', availableWidth);
-            const lineHeight = TEXT_MAX_FONT_SIZE * 1.25;
+            const lineHeight = fontSize * 1.25;
             const topPad = Math.max(0, (availableHeight - lines.length * lineHeight) / 2);
             textarea.style.paddingTop = `${topPad}px`;
         };
@@ -655,20 +725,21 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
         // Start the fire from wherever the note is touching the coal
         // rather than always dead-center: the closest point on the note's
-        // on-screen rect to the coal's center, converted to canvas-local
+        // board-local rect to the coal's center, converted to canvas-local
         // pixel coordinates. Clamping the coal's center into the note's
-        // rect gives that closest point directly.
-        let ignitionPoint: { x: number; y: number } | undefined;
-        const coal = coalRef.current;
-        if (coal) {
-            const noteBox = canvas.getBoundingClientRect();
-            const coalBox = coal.getBoundingClientRect();
-            const coalCenterX = (coalBox.left + coalBox.right) / 2;
-            const coalCenterY = (coalBox.top + coalBox.bottom) / 2;
-            const closestX = Math.min(Math.max(coalCenterX, noteBox.left), noteBox.right);
-            const closestY = Math.min(Math.max(coalCenterY, noteBox.top), noteBox.bottom);
-            ignitionPoint = { x: closestX - noteBox.left, y: closestY - noteBox.top };
-        }
+        // rect gives that closest point directly. Computed from the same
+        // board-local constants/style values used everywhere else (rather
+        // than measuring the DOM) so it stays correct regardless of the
+        // board's current CSS scale — canvas-local pixels (canvas.width is
+        // always NOTE_SIZE) and board-local pixels are the same units here,
+        // no scale conversion needed.
+        const noteLeft = parseFloat(canvas.style.left) || 0;
+        const noteTop = parseFloat(canvas.style.top) || 0;
+        const coalCenterX = (COAL_BOX.left + COAL_BOX.right) / 2;
+        const coalCenterY = (COAL_BOX.top + COAL_BOX.bottom) / 2;
+        const closestX = Math.min(Math.max(coalCenterX, noteLeft), noteLeft + NOTE_SIZE);
+        const closestY = Math.min(Math.max(coalCenterY, noteTop), noteTop + NOTE_SIZE);
+        const ignitionPoint: { x: number; y: number } = { x: closestX - noteLeft, y: closestY - noteTop };
 
         // Once the animation finishes, tell the server the note is gone for
         // real; its noteDeleted broadcast is what drops the canvas from the
@@ -739,8 +810,8 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         const onDragging = ({ id, x, y }: { id: string; x: number; y: number }) => {
             const canvas = canvasRefs.current[id];
             if (canvas) {
-                canvas.style.left = `${centerFractionToTopLeft(x, window.innerWidth)}px`;
-                canvas.style.top = `${centerFractionToTopLeft(y, window.innerHeight)}px`;
+                canvas.style.left = `${centerFractionToTopLeft(x, BOARD_WIDTH)}px`;
+                canvas.style.top = `${centerFractionToTopLeft(y, BOARD_HEIGHT)}px`;
                 bringToFront(canvas); // another client just grabbed/moved this one — keep the "last touched" ordering in sync
             }
         };
@@ -793,7 +864,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             if (!canvas) continue;
             canvas.width = 200;
             canvas.height = 200;
-            canvas.style.position = 'fixed';
+            canvas.style.position = 'absolute';
             canvas.style.touchAction = 'none';
 
             const slotX = DISPENSER_ORIGIN.x + i * STACK_OFFSET_STEP;
@@ -817,10 +888,17 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
             canvas.onpointermove = (e) => {
                 if (!dragOrigin) return;
-                const dx = e.clientX - dragOrigin.pointerX;
-                const dy = e.clientY - dragOrigin.pointerY;
-                if (!dragged && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                // The click-vs-drag threshold is a physical-finger distance,
+                // so it's judged in real screen px; only the actual movement
+                // applied to the canvas needs converting to board-local px
+                // (dividing by the board's current CSS scale), since
+                // canvas.style.left/top are always in that unit.
+                const screenDx = e.clientX - dragOrigin.pointerX;
+                const screenDy = e.clientY - dragOrigin.pointerY;
+                if (!dragged && Math.hypot(screenDx, screenDy) < DRAG_THRESHOLD) return;
                 dragged = true;
+                const dx = screenDx / scaleRef.current;
+                const dy = screenDy / scaleRef.current;
                 canvas.style.left = `${slotX + dx}px`;
                 canvas.style.top = `${slotY + dy}px`;
             };
@@ -856,7 +934,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                 }, 4000);
                 socket.emit('addNote', {
                     text: '',
-                    position: { x: topLeftToCenterFraction(dropX, window.innerWidth), y: topLeftToCenterFraction(dropY, window.innerHeight) },
+                    position: { x: topLeftToCenterFraction(dropX, BOARD_WIDTH), y: topLeftToCenterFraction(dropY, BOARD_HEIGHT) },
                     ignite: isOverCoal(dropX, dropY),
                     clientToken: token,
                 });
@@ -878,10 +956,10 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             canvas.dataset.id = note._id;
             canvas.setAttribute('name', note._id);
 
-            // Freely draggable anywhere on the screen — placed notes render
+            // Freely draggable anywhere on the board — placed notes render
             // at their saved position, everything else piles up in the
             // corner stack until someone drags it out.
-            canvas.style.position = 'fixed';
+            canvas.style.position = 'absolute';
             canvas.style.touchAction = 'none'; // don't let touch-scroll fight the drag
             if (isPlaced(note)) {
                 const { left, top } = notePositionToPixels(note.position);
@@ -929,19 +1007,24 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
             canvas.onpointermove = (e) => {
                 if (!dragOrigin) return;
-                const dx = e.clientX - dragOrigin.pointerX;
-                const dy = e.clientY - dragOrigin.pointerY;
-                if (!dragged && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                // The click-vs-drag threshold is a physical-finger distance,
+                // so it's judged in real screen px; only the actual movement
+                // applied to the canvas needs converting to board-local px
+                // (dividing by the board's current CSS scale), since
+                // canvas.style.left/top are always in that unit.
+                const screenDx = e.clientX - dragOrigin.pointerX;
+                const screenDy = e.clientY - dragOrigin.pointerY;
+                if (!dragged && Math.hypot(screenDx, screenDy) < DRAG_THRESHOLD) return;
                 dragged = true;
-                const x = dragOrigin.startLeft + dx;
-                const y = dragOrigin.startTop + dy;
+                const x = dragOrigin.startLeft + screenDx / scaleRef.current;
+                const y = dragOrigin.startTop + screenDy / scaleRef.current;
                 canvas.style.left = `${x}px`;
                 canvas.style.top = `${y}px`;
                 // Live position only — no DB write here, too frequent (see server).
-                // Sent as a center-relative viewport fraction (see
+                // Sent as a center-relative board fraction (see
                 // topLeftToCenterFraction) so it lands in the right spot
                 // on a differently-sized screen, not just this one.
-                socket.emit('note_dragging', { id: note._id, x: topLeftToCenterFraction(x, window.innerWidth), y: topLeftToCenterFraction(y, window.innerHeight) });
+                socket.emit('note_dragging', { id: note._id, x: topLeftToCenterFraction(x, BOARD_WIDTH), y: topLeftToCenterFraction(y, BOARD_HEIGHT) });
             };
 
             canvas.onpointerup = (e) => {
@@ -956,8 +1039,8 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                     triggerBurn(note._id, true);
                     return;
                 }
-                const fx = topLeftToCenterFraction(x, window.innerWidth);
-                const fy = topLeftToCenterFraction(y, window.innerHeight);
+                const fx = topLeftToCenterFraction(x, BOARD_WIDTH);
+                const fy = topLeftToCenterFraction(y, BOARD_HEIGHT);
                 socket.emit('note_drag_end', { id: note._id, x: fx, y: fy });
                 setNotePosition(note._id, fx, fy);
             };
@@ -986,13 +1069,29 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
     // render that effect fires after, and the dispenser would never get
     // wired up at all.
     return (
-        <div>
+        // The board itself: a fixed BOARD_WIDTH x BOARD_HEIGHT box, centered
+        // in the real viewport and uniformly scaled to fit it (see `scale`
+        // above) — this is what makes every device agree on the same
+        // layout. `position: fixed` here (rather than on each child, as
+        // before) is what establishes this div as the containing block for
+        // its `position: absolute` children below, so the coal/dispenser/
+        // notes only ever need to think in board-local pixels.
+        <div
+            style={{
+                position: 'fixed',
+                top: '50%',
+                left: '50%',
+                width: BOARD_WIDTH,
+                height: BOARD_HEIGHT,
+                transform: `translate(-50%, -50%) scale(${scale})`,
+                transformOrigin: 'center center',
+            }}
+        >
             <img
-                ref={coalRef}
                 src={coalUrl}
                 alt=""
                 style={{
-                    position: 'fixed',
+                    position: 'absolute',
                     top: '50%',
                     left: '50%',
                     transform: 'translate(-50%, -50%)',

@@ -2,9 +2,8 @@ import React, { useEffect } from 'react';
 import useSWR from 'swr';
 import { useParams } from 'react-router-dom';
 import NoteList from '../components/NoteList';
-import ShareLink from '../components/ShareLink';
 import RoomTitle from '../components/RoomTitle';
-import HomeButton from '../components/HomeButton';
+import HeaderMenu from '../components/HeaderMenu';
 import { useRecentRooms } from '../hooks/useRecentRooms';
 import { API_BASE_URL } from '../config';
 
@@ -45,17 +44,7 @@ export default function RoomPage() {
     // so NoteList's per-room state never carries over from a previous room.
     return (
         <>
-            <div style={{
-                position: 'fixed',
-                top: 16,
-                right: 16,
-                zIndex: 9999,
-                display: 'flex',
-                gap: 8,
-            }}>
-                <HomeButton />
-                <ShareLink />
-            </div>
+            <HeaderMenu />
             <RoomTitle name={data?.name ?? ''} />
             <NoteList roomId={roomId} key={roomId} />
         </>

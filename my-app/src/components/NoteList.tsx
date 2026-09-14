@@ -13,17 +13,34 @@ const COAL_SIZE = 160;
 // Every position (coal, dispenser, notes) is computed in these board-local
 // pixels, and the whole board is then rendered inside a container of exactly
 // this size that gets CSS-scaled (uniformly, so it never distorts) to fit
-// the real viewport — see the `scale` state in NoteList. A laptop/desktop
-// viewport close to this size ends up at ~1:1 scale, i.e. looks exactly like
-// it always has; a phone just gets a small, fully zoomed-out view of the
-// same board, which the user can pinch-zoom into. This is what makes two
-// different screens agree on "the same distance from the coal": that used
-// to be a fraction of each device's own (differently sized) viewport, so it
-// was only ever the same *relative* to that device's screen. Fractions are
-// now taken against these fixed dimensions instead, so they mean the same
-// absolute board position everywhere.
+// the real viewport — see the `scaleRef`/`zoomRef` state in NoteList. A
+// laptop/desktop viewport close to this size ends up at ~1:1 scale, i.e.
+// looks exactly like it always has; a phone just gets a small, fully
+// zoomed-out view of the same board, which the user can pinch-zoom into.
+// This is what makes two different screens agree on "the same distance from
+// the coal": that used to be a fraction of each device's own (differently
+// sized) viewport, so it was only ever the same *relative* to that device's
+// screen. Fractions are now taken against these fixed dimensions instead,
+// so they mean the same absolute board position everywhere.
 const BOARD_WIDTH = 1440;
 const BOARD_HEIGHT = 900;
+
+// The zoom-in gesture (two-finger pinch, or ctrl+wheel on a trackpad) is
+// implemented entirely ourselves as a transform on the board's own
+// container — see zoomRef/panRef/applyBoardTransform below — rather than
+// relying on the browser's native pinch-zoom (disabled via index.html's
+// viewport meta). Native pinch-zoom magnifies the *whole rendered page*,
+// including HeaderMenu/RoomTitle's `position: fixed` elements, which then
+// have to be dragged back into view with JS every time the browser's own
+// zoom moves them — that compensation is inherently laggy (it's reacting a
+// frame or more behind the browser's own compositor-level zoom) and reads
+// as shaky. Scoping the zoom to just this component's own transform means
+// `position: fixed` siblings elsewhere are never touched by it at all, so
+// there's nothing to compensate for. Zoom is clamped to [1, MAX_ZOOM] — 1
+// (never below) is the auto-fit view above; there's no reason to zoom out
+// further than that.
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 4;
 
 // Small pre-rendered glow used for every ember particle, so a frame only ever
 // needs a cheap drawImage() instead of building a radial gradient per-particle.
@@ -507,23 +524,191 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
     const dispenserRefs = useRef<(HTMLCanvasElement | null)[]>([]);
     // How much the fixed-size board is currently scaled down (or, capped at
     // 1, not scaled at all) to fit the real viewport — see computeScale.
-    // Kept as both state (so the board container's inline transform style
-    // re-renders on change) and a ref (so pointer handlers set up once per
-    // note, per the initializedIds guard below, always read the *current*
-    // scale instead of whatever it was when that note's canvas was wired up).
-    const [scale, setScale] = useState<number>(computeScale);
-    const scaleRef = useRef(scale);
+    // Plain refs, not state: the board's transform is written straight to
+    // the DOM (see applyBoardTransform) on every pointer/wheel move so a
+    // pinch or scroll-zoom feels immediate — round-tripping that through
+    // React state/re-render on every gesture frame would be both slower and
+    // unnecessary, since nothing else in this component's render output
+    // depends on the current scale/zoom/pan.
+    const scaleRef = useRef<number>(computeScale());
+    // User-driven zoom on top of the auto-fit scaleRef above (see MAX_ZOOM),
+    // and the raw-pixel pan offset that goes with it once zoomed past what
+    // fits the screen — both start neutral and reset whenever the viewport
+    // resizes (see the resize handler below), since old pan/zoom bounds
+    // otherwise stop making sense the moment the fit scale changes under it.
+    const zoomRef = useRef(1);
+    const panRef = useRef({ x: 0, y: 0 });
+    // The two DOM nodes applyBoardTransform writes to directly: the outer
+    // one carries pan (translate only), the inner one carries the
+    // center-and-scale that already existed — see the return statement.
+    const panWrapperRef = useRef<HTMLDivElement | null>(null);
+    const boardScaleRef = useRef<HTMLDivElement | null>(null);
+    // The actual, total screen-px-per-board-px factor right now — fit scale
+    // times user zoom — used everywhere a screen-space distance (a drag, an
+    // edit overlay's font size) needs converting to/from board-local pixels.
+    const getDisplayScale = () => scaleRef.current * zoomRef.current;
+    const applyBoardTransform = () => {
+        const displayScale = getDisplayScale();
+        if (boardScaleRef.current) {
+            boardScaleRef.current.style.transform = `translate(-50%, -50%) scale(${displayScale})`;
+        }
+        if (panWrapperRef.current) {
+            panWrapperRef.current.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px)`;
+        }
+    };
+    // Stops pan from ever revealing empty space past the board's own edges:
+    // once the rendered board is bigger than the viewport on an axis, the
+    // most you can pan is however far it takes to bring the far edge flush
+    // with the screen edge; if it's smaller than the viewport, there's
+    // nothing to pan on that axis at all (locked to 0, i.e. centered).
+    const clampPan = (p: { x: number; y: number }, zoom: number): { x: number; y: number } => {
+        const displayScale = scaleRef.current * zoom;
+        const maxX = Math.max(0, (BOARD_WIDTH * displayScale - window.innerWidth) / 2);
+        const maxY = Math.max(0, (BOARD_HEIGHT * displayScale - window.innerHeight) / 2);
+        return { x: Math.min(maxX, Math.max(-maxX, p.x)), y: Math.min(maxY, Math.max(-maxY, p.y)) };
+    };
+    // The pan needed so that whatever board point sat under screen point
+    // `anchorOld` before this zoom/pan step ends up under `anchorNew`
+    // afterwards — i.e. "zoom (and optionally drag) around a fixed point"
+    // instead of always around the board's center. For a plain scroll-zoom
+    // (mouse stays put) anchorOld and anchorNew are the same point; a pinch
+    // passes the midpoint's last and current position so panning happens
+    // for free as a side effect of the fingers themselves moving.
+    const panAfterZoom = (
+        anchorOld: { x: number; y: number },
+        anchorNew: { x: number; y: number },
+        oldZoom: number,
+        newZoom: number,
+        oldPan: { x: number; y: number },
+    ): { x: number; y: number } => {
+        const k = newZoom / oldZoom;
+        const cx = window.innerWidth / 2;
+        const cy = window.innerHeight / 2;
+        return {
+            x: (anchorNew.x - cx) - (anchorOld.x - cx) * k + oldPan.x * k,
+            y: (anchorNew.y - cy) - (anchorOld.y - cy) * k + oldPan.y * k,
+        };
+    };
+    // Pointers currently being tracked for a possible pan/pinch, and the
+    // running state of whichever gesture is active — pinchRef once exactly
+    // two are down (recomputed from the *previous* frame, not the gesture's
+    // start, so a pinch that drifts sideways pans naturally instead of only
+    // ever zooming around where it began), panDragRef while exactly one is
+    // down (a plain one-finger drag once you're zoomed in — same
+    // frame-to-frame-delta approach). claimedPointerIds is how a pointer
+    // that's actually dragging a note or a dispenser template (see their
+    // own onpointerdown/up below) opts itself out of being read as part of
+    // either gesture, so it doesn't fight a note drag for the same touch.
+    const activeBoardPointers = useRef<Map<number, { x: number; y: number }>>(new Map());
+    const pinchRef = useRef<{ lastDist: number; lastMid: { x: number; y: number } } | null>(null);
+    const panDragRef = useRef<{ x: number; y: number } | null>(null);
+    const claimedPointerIds = useRef<Set<number>>(new Set());
+
+    const onBoardPointerDown = (e: React.PointerEvent) => {
+        if (claimedPointerIds.current.has(e.pointerId)) return;
+        activeBoardPointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (activeBoardPointers.current.size === 2) {
+            const [p1, p2] = Array.from(activeBoardPointers.current.values());
+            pinchRef.current = {
+                lastDist: Math.hypot(p1.x - p2.x, p1.y - p2.y),
+                lastMid: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 },
+            };
+            panDragRef.current = null; // a second finger just landed — the pinch above takes over panning too
+        } else if (activeBoardPointers.current.size === 1) {
+            panDragRef.current = { x: e.clientX, y: e.clientY };
+        }
+    };
+    const onBoardPointerMove = (e: React.PointerEvent) => {
+        if (!activeBoardPointers.current.has(e.pointerId)) return;
+        activeBoardPointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (activeBoardPointers.current.size === 2 && pinchRef.current) {
+            const [p1, p2] = Array.from(activeBoardPointers.current.values());
+            const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+            const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+            const { lastDist, lastMid } = pinchRef.current;
+            const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoomRef.current * (dist / lastDist)));
+            const newPan = clampPan(panAfterZoom(lastMid, mid, zoomRef.current, newZoom, panRef.current), newZoom);
+            zoomRef.current = newZoom;
+            panRef.current = newPan;
+            pinchRef.current = { lastDist: dist, lastMid: mid };
+            applyBoardTransform();
+        } else if (activeBoardPointers.current.size === 1 && panDragRef.current) {
+            const cur = { x: e.clientX, y: e.clientY };
+            const newPan = clampPan({
+                x: panRef.current.x + (cur.x - panDragRef.current.x),
+                y: panRef.current.y + (cur.y - panDragRef.current.y),
+            }, zoomRef.current);
+            panRef.current = newPan;
+            panDragRef.current = cur;
+            applyBoardTransform();
+        }
+    };
+    const onBoardPointerEnd = (e: React.PointerEvent) => {
+        activeBoardPointers.current.delete(e.pointerId);
+        const remaining = Array.from(activeBoardPointers.current.values());
+        if (remaining.length === 2) {
+            // Dropped straight from 3 pointers to 2 (a third finger lifting
+            // off) — start a fresh pinch baseline from here rather than one
+            // that's now stale.
+            pinchRef.current = {
+                lastDist: Math.hypot(remaining[0].x - remaining[1].x, remaining[0].y - remaining[1].y),
+                lastMid: { x: (remaining[0].x + remaining[1].x) / 2, y: (remaining[0].y + remaining[1].y) / 2 },
+            };
+            panDragRef.current = null;
+        } else if (remaining.length === 1) {
+            // One finger of a pinch lifted — hand off to a one-finger pan
+            // continuing from exactly where the remaining finger already
+            // is, so nothing jumps.
+            pinchRef.current = null;
+            panDragRef.current = remaining[0];
+        } else {
+            pinchRef.current = null;
+            panDragRef.current = null;
+        }
+    };
+
     useEffect(() => {
-        scaleRef.current = scale;
-    }, [scale]);
-    useEffect(() => {
-        const onResize = () => setScale(computeScale());
+        const onResize = () => {
+            scaleRef.current = computeScale();
+            zoomRef.current = 1;
+            panRef.current = { x: 0, y: 0 };
+            applyBoardTransform();
+        };
         window.addEventListener('resize', onResize);
         window.addEventListener('orientationchange', onResize);
         return () => {
             window.removeEventListener('resize', onResize);
             window.removeEventListener('orientationchange', onResize);
         };
+    // applyBoardTransform only touches refs/DOM nodes, never a stale
+    // reactive value, so the closure captured here at mount stays correct —
+    // no need to re-subscribe every render just to satisfy exhaustive-deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Trackpad pinch (and ctrl+scroll) arrives as a `wheel` event with
+    // ctrlKey set — the same zoom math as a touch pinch, just with a single
+    // fixed anchor (the cursor) instead of a moving midpoint. Wired up as a
+    // real (non-passive) DOM listener rather than React's onWheel: React
+    // registers wheel listeners as passive for scroll-performance reasons,
+    // which silently no-ops preventDefault — and it's needed here to stop
+    // the browser's own page-zoom/scroll from also firing on top of ours.
+    useEffect(() => {
+        const el = panWrapperRef.current;
+        if (!el) return;
+        const onWheel = (e: WheelEvent) => {
+            if (!e.ctrlKey) return; // a plain two-finger scroll has nothing to scroll here — leave it alone
+            e.preventDefault();
+            const anchor = { x: e.clientX, y: e.clientY };
+            const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoomRef.current * Math.exp(-e.deltaY * 0.01)));
+            const newPan = clampPan(panAfterZoom(anchor, anchor, zoomRef.current, newZoom, panRef.current), newZoom);
+            zoomRef.current = newZoom;
+            panRef.current = newPan;
+            applyBoardTransform();
+        };
+        el.addEventListener('wheel', onWheel, { passive: false });
+        return () => el.removeEventListener('wheel', onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     // Grabs from the dispenser, keyed by a token unique to that grab. The
     // real note is created the moment a grab turns into an actual drag (see
@@ -575,7 +760,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
     // coal" and should start burning instead of just staying put there.
     // Compared against the constant, board-local COAL_BOX rather than a
     // measured DOM rect so this stays correct regardless of the board's
-    // current CSS scale (see `scale` above).
+    // current display scale (see getDisplayScale above).
     const isOverCoal = (x: number, y: number): boolean =>
         x < COAL_BOX.right && x + NOTE_SIZE > COAL_BOX.left && y < COAL_BOX.bottom && y + NOTE_SIZE > COAL_BOX.top;
 
@@ -623,13 +808,13 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         const box = canvas.getBoundingClientRect();
 
         // box is in real screen pixels — already scaled down/up by the
-        // board's current CSS scale (see `scale` above) — but TEXT_PADDING/
-        // TEXT_MAX_FONT_SIZE are board-local (canvas buffer) constants, so
-        // this overlay textarea (a real DOM element, unlike the canvas
-        // itself, has no separate "buffer" to auto-scale) needs its own
-        // padding/font scaled to match however small or large the note is
-        // currently rendering on screen.
-        const editScale = scaleRef.current;
+        // board's current display scale (fit scale * user zoom, see
+        // getDisplayScale) — but TEXT_PADDING/TEXT_MAX_FONT_SIZE are
+        // board-local (canvas buffer) constants, so this overlay textarea (a
+        // real DOM element, unlike the canvas itself, has no separate
+        // "buffer" to auto-scale) needs its own padding/font scaled to match
+        // however small or large the note is currently rendering on screen.
+        const editScale = getDisplayScale();
         const padding = TEXT_PADDING * editScale;
         const fontSize = TEXT_MAX_FONT_SIZE * editScale;
         const availableWidth = box.width - padding * 2;
@@ -955,6 +1140,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
             canvas.onpointerdown = (e) => {
                 canvas.setPointerCapture(e.pointerId);
+                claimedPointerIds.current.add(e.pointerId); // opts this pointer out of being read as one half of a board pinch
                 bringToFront(canvas);
                 dragged = false;
                 activeToken = null;
@@ -966,15 +1152,15 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                 // The click-vs-drag threshold is a physical-finger distance,
                 // so it's judged in real screen px; only the actual movement
                 // applied to the canvas needs converting to board-local px
-                // (dividing by the board's current CSS scale), since
+                // (dividing by the board's current display scale), since
                 // canvas.style.left/top are always in that unit.
                 const screenDx = e.clientX - dragOrigin.pointerX;
                 const screenDy = e.clientY - dragOrigin.pointerY;
                 if (!dragged && Math.hypot(screenDx, screenDy) < DRAG_THRESHOLD) return;
                 const justGrabbed = !dragged;
                 dragged = true;
-                const dx = screenDx / scaleRef.current;
-                const dy = screenDy / scaleRef.current;
+                const dx = screenDx / getDisplayScale();
+                const dy = screenDy / getDisplayScale();
                 const x = slotX + dx;
                 const y = slotY + dy;
                 canvas.style.left = `${x}px`;
@@ -1002,6 +1188,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
             canvas.onpointerup = (e) => {
                 canvas.releasePointerCapture(e.pointerId);
+                claimedPointerIds.current.delete(e.pointerId);
                 const wasDragged = dragged;
                 const dropX = parseFloat(canvas.style.left) || slotX;
                 const dropY = parseFloat(canvas.style.top) || slotY;
@@ -1095,6 +1282,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             canvas.onpointerdown = (e) => {
                 if (burningIds.current.has(note._id)) return; // already on fire — leave it be
                 canvas.setPointerCapture(e.pointerId);
+                claimedPointerIds.current.add(e.pointerId); // opts this pointer out of being read as one half of a board pinch
                 bringToFront(canvas);
                 dragged = false;
                 dragOrigin = {
@@ -1110,14 +1298,14 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                 // The click-vs-drag threshold is a physical-finger distance,
                 // so it's judged in real screen px; only the actual movement
                 // applied to the canvas needs converting to board-local px
-                // (dividing by the board's current CSS scale), since
+                // (dividing by the board's current display scale), since
                 // canvas.style.left/top are always in that unit.
                 const screenDx = e.clientX - dragOrigin.pointerX;
                 const screenDy = e.clientY - dragOrigin.pointerY;
                 if (!dragged && Math.hypot(screenDx, screenDy) < DRAG_THRESHOLD) return;
                 dragged = true;
-                const x = dragOrigin.startLeft + screenDx / scaleRef.current;
-                const y = dragOrigin.startTop + screenDy / scaleRef.current;
+                const x = dragOrigin.startLeft + screenDx / getDisplayScale();
+                const y = dragOrigin.startTop + screenDy / getDisplayScale();
                 canvas.style.left = `${x}px`;
                 canvas.style.top = `${y}px`;
                 // Live position only — no DB write here, too frequent (see server).
@@ -1129,6 +1317,7 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
             canvas.onpointerup = (e) => {
                 canvas.releasePointerCapture(e.pointerId);
+                claimedPointerIds.current.delete(e.pointerId);
                 const wasDragged = dragged;
                 dragOrigin = null;
                 dragged = false;
@@ -1169,45 +1358,66 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
     // render that effect fires after, and the dispenser would never get
     // wired up at all.
     return (
-        // The board itself: a fixed BOARD_WIDTH x BOARD_HEIGHT box, centered
-        // in the real viewport and uniformly scaled to fit it (see `scale`
-        // above) — this is what makes every device agree on the same
-        // layout. `position: fixed` here (rather than on each child, as
-        // before) is what establishes this div as the containing block for
-        // its `position: absolute` children below, so the coal/dispenser/
-        // notes only ever need to think in board-local pixels.
+        // Outer layer: owns pan only (a raw-px translate), and is where the
+        // pinch/scroll-zoom gesture is actually listened for — see
+        // onBoardPointer*/the wheel effect above. `position: fixed; inset: 0`
+        // spans the full viewport so it can catch a second finger landing
+        // anywhere on the board, and having its own `transform` (even a
+        // no-op translate(0,0) at rest) makes it the containing block for
+        // the `position: fixed` board div below, which is what lets pan
+        // move it. touchAction 'none' hands the whole gesture to us instead
+        // of letting the browser also try to scroll/zoom underneath it.
         <div
-            style={{
-                position: 'fixed',
-                top: '50%',
-                left: '50%',
-                width: BOARD_WIDTH,
-                height: BOARD_HEIGHT,
-                transform: `translate(-50%, -50%) scale(${scale})`,
-                transformOrigin: 'center center',
-            }}
+            ref={panWrapperRef}
+            style={{ position: 'fixed', inset: 0, transform: 'translate(0px, 0px)', touchAction: 'none' }}
+            onPointerDown={onBoardPointerDown}
+            onPointerMove={onBoardPointerMove}
+            onPointerUp={onBoardPointerEnd}
+            onPointerCancel={onBoardPointerEnd}
         >
-            <img
-                src={coalUrl}
-                alt=""
+            {/* The board itself: a fixed BOARD_WIDTH x BOARD_HEIGHT box,
+                centered in the panned viewport and uniformly scaled to fit
+                it times the user's current zoom (see getDisplayScale) —
+                this is what makes every device agree on the same layout.
+                `position: fixed` here (rather than on each child, as
+                before) is what establishes this div as the containing block
+                for its `position: absolute` children below, so the
+                coal/dispenser/notes only ever need to think in board-local
+                pixels. */}
+            <div
+                ref={boardScaleRef}
                 style={{
-                    position: 'absolute',
+                    position: 'fixed',
                     top: '50%',
                     left: '50%',
-                    transform: 'translate(-50%, -50%)',
-                    width: COAL_SIZE,
-                    height: COAL_SIZE,
-                    pointerEvents: 'none', // sits under draggable notes without blocking them
+                    width: BOARD_WIDTH,
+                    height: BOARD_HEIGHT,
+                    transform: `translate(-50%, -50%) scale(${getDisplayScale()})`,
+                    transformOrigin: 'center center',
                 }}
-            />
-            {Array.from({ length: DISPENSER_COUNT }, (_, i) => (
-                <canvas key={`dispenser-${i}`} ref={(el) => { dispenserRefs.current[i] = el; }} />
-            ))}
-            {isLoading && <p>Loading...</p>}
-            {isError && <p style={{ color: 'red' }}>Failed to load notes</p>}
-            {!isLoading && !isError && visibleNotes.map((note) => (
-                <canvas key={note._id} id={note._id} ref={setCanvasRef(String(note._id))} />
-            ))}
+            >
+                <img
+                    src={coalUrl}
+                    alt=""
+                    style={{
+                        position: 'absolute',
+                        top: '50%',
+                        left: '50%',
+                        transform: 'translate(-50%, -50%)',
+                        width: COAL_SIZE,
+                        height: COAL_SIZE,
+                        pointerEvents: 'none', // sits under draggable notes without blocking them
+                    }}
+                />
+                {Array.from({ length: DISPENSER_COUNT }, (_, i) => (
+                    <canvas key={`dispenser-${i}`} ref={(el) => { dispenserRefs.current[i] = el; }} />
+                ))}
+                {isLoading && <p>Loading...</p>}
+                {isError && <p style={{ color: 'red' }}>Failed to load notes</p>}
+                {!isLoading && !isError && visibleNotes.map((note) => (
+                    <canvas key={note._id} id={note._id} ref={setCanvasRef(String(note._id))} />
+                ))}
+            </div>
         </div>
     )
 };

@@ -12,10 +12,16 @@ import ShareLink from './ShareLink';
 //
 // `position: fixed` (rather than living inside NoteList's board) is what
 // keeps this pinned to the real screen corner regardless of NoteList's own
-// board being panned/pinch-zoomed — see BOARD_WIDTH's comment in
-// NoteList.tsx. That's what "sticky" means here: it's a sibling of the
-// board, not a descendant of the div NoteList scales, so it never moves
-// with it.
+// board being panned/zoomed — see BOARD_WIDTH's comment in NoteList.tsx.
+// That's what "sticky" means here: it's a sibling of the board, not a
+// descendant of the div NoteList scales, so it never moves with it. The
+// board's own pinch/scroll-zoom is implemented entirely as a transform on
+// NoteList's own container (not the browser's native pinch-zoom, which is
+// disabled in index.html) specifically so this stays a *plain* `fixed`
+// element with nothing to compensate for — an earlier version tried to
+// counter native pinch-zoom's effect on `fixed` elements with JS, which
+// only ever approximated the browser's own zoom a frame or so late and
+// read as visibly shaky.
 export default function HeaderMenu() {
     const [open, setOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement | null>(null);

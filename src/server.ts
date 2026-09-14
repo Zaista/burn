@@ -104,21 +104,21 @@ io.on('connection', (socket) => {
     });
 
     // `position` is set when a note is created by dragging it off the
-    // corner stack (its drop point) — omitted (or optional fields on the
+    // corner stack — as of the dispenser, that happens the instant the drag
+    // starts (its position then), not when it's dropped, so every client
+    // sees the note right away and gets live note_dragging updates for it
+    // the same as any other note. Omitted (or optional fields on the
     // payload) leaves the note unpositioned, so the client falls back to
-    // rendering it in the legacy stack. `ignite` is set when that drop
-    // point was directly on the coal. `clientToken`, if given, is echoed
-    // straight back — neither is persisted (not real Note fields), both
-    // are just relayed to every client: ignite so they can all start the
-    // burn the moment the note arrives, clientToken so the client that
-    // created it can recognize its own note among any other client's
+    // rendering it in the legacy stack. `clientToken`, if given, is echoed
+    // straight back (not persisted, not a real Note field) so the client
+    // that created it can recognize its own note among any other client's
     // concurrent noteAdded broadcasts.
-    socket.on('addNote', async ({ text, position, ignite, clientToken }: { text: string; position?: { x: number; y: number }; ignite?: boolean; clientToken?: string }) => {
+    socket.on('addNote', async ({ text, position, clientToken }: { text: string; position?: { x: number; y: number }; clientToken?: string }) => {
         const roomId = socket.data.roomId;
         if (!roomId) return;
         const newNote = new Note({ text, position, roomId });
         await newNote.save();
-        io.to(roomId).emit('noteAdded', { _id: newNote._id, text: newNote.text, position: newNote.position, ignite: !!ignite, clientToken });
+        io.to(roomId).emit('noteAdded', { _id: newNote._id, text: newNote.text, position: newNote.position, clientToken });
     });
 
     socket.on('deleteNote', async (id) => {

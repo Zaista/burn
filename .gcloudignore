@@ -4,9 +4,11 @@
 .idea
 .claude
 
-# This app.yaml/cloudbuild.yaml pair deploys the backend only (src/ ->
-# dist/, compiled during App Engine's build via the gcp-build script).
-# The my-app/ frontend is a separate deployable and isn't needed here.
+# cloudbuild.yaml's backend-deploy step (`gcloud run deploy --source .`)
+# deploys the backend only (src/ -> dist/, compiled during Cloud Run's
+# buildpack build via the gcp-build script). The my-app/ frontend is a
+# separate deployable (its own --source my-app deploy) and isn't needed
+# here.
 my-app/
 private/
 node_modules/

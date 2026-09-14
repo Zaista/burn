@@ -41,6 +41,10 @@ docker-compose up -d
 ```
 Starts a `mongo` container, persisting to `./private/mongodb/data`. `mongo-init.js` creates the app-level user (`appuser`/`apppass`, `readWrite` on the `postit` database) that `src/server.ts` connects with — the connection string and credentials are currently hardcoded in `server.ts`.
 
+## Deployment
+
+Both services run on **Cloud Run** (not App Engine) — `burn-backend` (`src/` → `dist/`) and `burn-frontend` (`my-app/`, a static Vite build served via `serve -s dist`), each deployed straight from source via Google Cloud buildpacks, no Dockerfile. `cloudbuild.yaml` is the source of truth for the full pipeline and every flag's rationale (session affinity + `--no-cpu-throttling` for Socket.IO, `--min-instances=0`, the backend-then-frontend ordering so the frontend can bake the backend's Cloud Run URL in as `VITE_API_BASE_URL`, the `--env-vars-file` dance around `MONGODB_URI` possibly containing a comma or `&`) — read it before changing deploy behavior rather than assuming App Engine-era docs elsewhere still apply.
+
 ## Architecture
 
 ### Backend (`src/server.ts` → compiled to `dist/`)

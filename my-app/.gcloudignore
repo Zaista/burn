@@ -19,8 +19,8 @@ public/
 # output this deploy needs to upload, built by cloudbuild.yaml's
 # frontend-build step). Same reasoning as the `gcp-build` no-op script
 # in package.json: this deploy ships a prebuilt dist/ rather than
-# letting App Engine's own buildpack rebuild it (which would run
-# without VITE_API_BASE_URL set).
+# letting Cloud Run's own buildpack rebuild it (which would run without
+# VITE_API_BASE_URL set).
 #
 # Deliberately does NOT include .gitignore's patterns (gcloud's
 # auto-generated default would via `#!include:.gitignore`) — .gitignore

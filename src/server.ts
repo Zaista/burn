@@ -14,13 +14,17 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// Connect to MongoDB. In production (e.g. App Engine) this should point at
+// Connect to MongoDB. In production (e.g. Cloud Run) this should point at
 // an externally-reachable Mongo (Atlas, or a Compute Engine box) via the
-// MONGODB_URI env var — App Engine instances can't reach `localhost:27017`.
+// MONGODB_URI env var — a Cloud Run container can't reach `localhost:27017`.
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://root:root@localhost:27017/burn';
 await mongoose.connect(MONGODB_URI, { authSource: 'admin' });
 
-// Used by App Engine's liveness/readiness checks (see app.yaml).
+// Not wired into Cloud Run as an explicit startup/liveness probe (a custom
+// health-check path needs a full Knative service YAML, not just `gcloud run
+// deploy` flags — Cloud Run's own default behavior of waiting for the
+// container to start accepting connections on $PORT already covers this app
+// well enough). Kept as a plain endpoint for manual checks either way.
 app.get('/healthz', (_req, res) => {
     res.status(mongoose.connection.readyState === 1 ? 200 : 503).send('ok');
 });

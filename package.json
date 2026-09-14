@@ -15,6 +15,9 @@
   "author": "Zaista",
   "type": "module",
   "main": "dist/server.js",
+  "engines": {
+    "node": "24"
+  },
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",

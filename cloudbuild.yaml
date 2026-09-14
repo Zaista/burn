@@ -1,63 +1,77 @@
-# Builds and deploys BOTH App Engine services on every push to master:
-#   - frontend (my-app/, static Vite build)      -> `burn-frontend` service
-#   - backend  (src/, Express + Socket.IO API)   -> `burn-backend` service
-# (neither is `default` — that's already this project's portfolio site)
-# Both redeploy on every trigger run regardless of which one actually
-# changed — fine given how infrequently this ships; each deploy is
-# idempotent.
+# Builds and deploys BOTH Cloud Run services on every push to master:
+#   - backend  (src/, Express + Socket.IO API)  -> burn-backend service
+#   - frontend (my-app/, static Vite build)     -> burn-frontend service
+# (neither is named `default`-equivalent — burn-backend/burn-frontend are
+# just this project's own service names, separate from anything else
+# running in this project)
+#
+# The backend deploys FIRST and the frontend SECOND — deliberately, not
+# alphabetically: the frontend's build needs to bake the backend's Cloud Run
+# URL in as VITE_API_BASE_URL (see src/config.ts), and that URL only exists
+# once the backend service does. Cloud Run URLs are stable once a service
+# exists (a redeploy doesn't change it), so this "read it back right after
+# deploying" step works the same on the very first run as on every run
+# after.
 #
 # Wire this up to a Cloud Build trigger on push to `master`
-# (config file location: /cloudbuild.yaml), and set a `_MONGODB_URI`
-# substitution variable on that trigger with the real connection string.
-# It's spliced into app.yaml's `__MONGODB_URI__` placeholder at deploy
-# time, so the real value never sits in the repo. Note: a plain trigger
-# substitution like this is visible in the build's logs/history — move it
-# to a Secret Manager-backed secretEnv instead if that's not acceptable.
+# (config file location: /cloudbuild.yaml), and set these substitution
+# variables on that trigger:
+#   _MONGODB_URI  the real Mongo connection string (no default here on
+#                 purpose — see backend-render-env below, it fails loudly
+#                 rather than silently deploying with no database)
+#   _REGION       defaults to europe-west3 below (inferred from this
+#                 project's existing App Engine app's region) — double
+#                 check that's actually right for you (`gcloud run services
+#                 list` or the Cloud Run console) and override on the
+#                 trigger if not; Cloud Run is regional per-service, unlike
+#                 App Engine's single app-wide region.
+# A plain trigger substitution for _MONGODB_URI is visible in the build's
+# logs/history — move it to a Secret Manager-backed secret (`--set-secrets`
+# on backend-deploy below) instead if that's not acceptable.
 #
 # One-time prerequisites this file assumes are already done:
-#   - `gcloud app create --region=...` (App Engine app must already exist)
-#   - the Cloud Build service account has roles/appengine.appAdmin,
-#     roles/iam.serviceAccountUser, and roles/storage.admin
+#   - Cloud Run API and Artifact Registry API enabled on the project
+#   - the Cloud Build service account has, at minimum: roles/run.admin
+#     (deploy/manage the services, including making them public — see
+#     --allow-unauthenticated below), roles/iam.serviceAccountUser (to
+#     deploy AS the runtime service account named below), and
+#     roles/artifactregistry.writer (a `--source` deploy builds a
+#     container and pushes it to Artifact Registry, auto-creating a
+#     `cloud-run-source-deploy` repo the first time). Exact role names
+#     drift over time — if a step fails on a permission, the gcloud error
+#     message names the missing one.
+#   - if your org has a policy restricting public (allUsers) Cloud Run
+#     access, --allow-unauthenticated below will fail even with the right
+#     IAM roles — that's an org policy exception, not something this file
+#     can work around.
 
 substitutions:
   _MONGODB_URI: "" # real value comes from the trigger config; empty here just avoids a hard failure on an ad-hoc manual build
+  _REGION: "europe-west3"
 
 steps:
-  # ---------------- frontend: my-app/ -> burn-frontend service ----------------
-  - id: frontend-install
-    name: 'gcr.io/cloud-builders/npm'
-    dir: 'my-app'
-    args: ['ci']
-
-  - id: frontend-build
-    name: 'gcr.io/cloud-builders/npm'
-    dir: 'my-app'
-    args: ['run', 'build']
-    env:
-      # Baked into the built JS bundle (see my-app/src/config.ts).
-      # ${PROJECT_ID} is a Cloud Build built-in substitution — no trigger
-      # config needed for this one.
-      - 'VITE_API_BASE_URL=https://burn-backend-dot-${PROJECT_ID}.appspot.com'
-
-  - id: frontend-deploy
-    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
-    args: ['app', 'deploy', 'my-app/app.yaml', '--quiet']
-
   # ---------------- backend: src/ -> burn-backend service ----------------
   - id: backend-install
     name: 'gcr.io/cloud-builders/npm'
     args: ['ci']
 
-  # Fails the build here (before touching App Engine) if the TypeScript
-  # doesn't compile. App Engine's own buildpack also runs this via the
-  # `gcp-build` script during `gcloud app deploy`, so this step is mainly
-  # fast feedback.
+  # Fails the build here (before touching Cloud Run) if the TypeScript
+  # doesn't compile. The buildpack backing `gcloud run deploy --source`
+  # also runs this via the `gcp-build` script, so this step is mainly fast
+  # feedback.
   - id: backend-build
     name: 'gcr.io/cloud-builders/npm'
     args: ['run', 'build']
 
-  - id: backend-render-config
+  # Writes the backend's runtime env vars to a file for backend-deploy's
+  # --env-vars-file, rather than passing --set-env-vars=KEY=VAL,KEY2=VAL2
+  # directly: that flag's own syntax treats a bare comma as the delimiter
+  # between vars, and a Mongo URI can itself contain one (a multi-host
+  # replica-set connection string, e.g. mongodb://host1,host2,host3/db) —
+  # same class of corruption risk as the `&` in a query string, just for a
+  # different tool. Writing it out with JSON.stringify (valid YAML) takes
+  # the value verbatim regardless of what characters it contains.
+  - id: backend-render-env
     name: 'gcr.io/cloud-builders/npm'
     entrypoint: bash
     args:
@@ -71,34 +85,146 @@ steps:
         # so a bad substitution (wrong scheme, stray quotes, truncation)
         # shows up in the build log without leaking the secret.
         echo "MONGODB_URI starts with '$${MONGODB_URI:0:14}' ($${#MONGODB_URI} chars total)"
-        # A plain sed replacement is unsafe here: sed's replacement text
-        # treats an unescaped `&` as "insert the matched pattern", and a
-        # Mongo URI (or its password) can easily contain `&` - e.g. the
-        # standard Atlas suffix ?retryWrites=true&w=majority, or a
-        # generated password. That silently corrupts it mid-string,
-        # which is almost certainly why auth just failed. Node's
-        # String.replace with a replacer FUNCTION (as opposed to a
-        # replacement string, which has its own `$&`/`$$` special cases)
-        # inserts the value verbatim regardless of what characters it
-        # contains.
         node -e "
           const fs = require('fs');
-          const path = 'app.yaml';
-          const uri = process.env.MONGODB_URI;
-          const content = fs.readFileSync(path, 'utf8');
-          if (!content.includes('##_MONGODB_URI##')) {
-            console.error('ERROR: ##_MONGODB_URI## placeholder not found in app.yaml');
-            process.exit(1);
-          }
-          fs.writeFileSync(path, content.replace('##_MONGODB_URI##', () => uri));
+          fs.writeFileSync('/workspace/backend-env.yaml', JSON.stringify({
+            NODE_ENV: 'production',
+            MONGODB_URI: process.env.MONGODB_URI,
+          }));
         "
     env:
       - 'MONGODB_URI=${_MONGODB_URI}'
 
+  # `--source=.` hands the current directory to the same Google Cloud
+  # buildpacks that were already building this app for App Engine Flex
+  # (npm ci, then the `gcp-build` script -> tsc, then `npm start` -> node
+  # dist/server.js as the container's entrypoint) — no Dockerfile needed.
+  #
+  # Flags translate the old app.yaml's settings:
+  #   --allow-unauthenticated   there's no login (see CLAUDE.md) — a room's
+  #                             link IS the access control, so the API has
+  #                             to be reachable by anyone with it, same as
+  #                             it was on App Engine.
+  #   --session-affinity        Socket.IO's connection state (and its
+  #                             polling-transport fallback) lives in one
+  #                             instance's memory — this is Cloud Run's
+  #                             equivalent of app.yaml's
+  #                             network.session_affinity: true, keeping a
+  #                             client pinned to the instance holding it.
+  #   --no-cpu-throttling       Cloud Run only guarantees CPU while
+  #                             actively handling request bytes by default;
+  #                             an open-but-idle WebSocket between
+  #                             Socket.IO's own ping/pong heartbeats needs
+  #                             CPU available in the gaps too, or those
+  #                             heartbeats can stall and the client sees a
+  #                             spurious disconnect. This keeps CPU
+  #                             allocated for the life of the container,
+  #                             not just mid-request — the tradeoff is
+  #                             you're billed for that too (see min/max
+  #                             instances below for the other half of that
+  #                             tradeoff).
+  #   --timeout=3600            Cloud Run's cap on a single request's
+  #                             lifetime, which a WebSocket counts against
+  #                             — set to the maximum Cloud Run allows so a
+  #                             connection is forced to reconnect as
+  #                             rarely as possible. The frontend already
+  #                             handles this fine either way: it re-emits
+  #                             joinRoom on every socket 'connect',
+  #                             including reconnects (see NoteList.tsx).
+  #   --concurrency=80          Cloud Run's default — each open socket
+  #                             occupies one concurrency slot for as long
+  #                             as it's connected, so this is "how many
+  #                             simultaneous users one instance holds
+  #                             before Cloud Run starts another", not a
+  #                             per-request throughput number. 80 is
+  #                             plenty for this app's expected traffic;
+  #                             written out explicitly here rather than
+  #                             left implicit so the number is visible.
+  #   --min-instances=0         Scales to zero when no room is open
+  #                             anywhere — cheaper than App Engine Flex's
+  #                             always-on min_num_instances: 1, at the
+  #                             cost of a few seconds' cold start for
+  #                             whoever's the first to open a room after a
+  #                             quiet stretch. A deliberate choice for a
+  #                             low-traffic app — bump to 1 if that
+  #                             cold-start latency ever becomes a problem.
+  #   --service-account         reuses the exact App Engine default
+  #                             service account this app already ran as
+  #                             under Flex, rather than introducing a new
+  #                             identity to provision — the backend only
+  #                             talks to MongoDB via a plain connection
+  #                             string, no other GCP API calls, so it
+  #                             doesn't need any different permissions
+  #                             either way.
   - id: backend-deploy
     name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        gcloud run deploy burn-backend \
+          --source=. \
+          --region=${_REGION} \
+          --service-account=${PROJECT_ID}@appspot.gserviceaccount.com \
+          --allow-unauthenticated \
+          --session-affinity \
+          --no-cpu-throttling \
+          --timeout=3600 \
+          --concurrency=80 \
+          --cpu=1 \
+          --memory=512Mi \
+          --min-instances=0 \
+          --max-instances=4 \
+          --env-vars-file=/workspace/backend-env.yaml \
+          --quiet
+        # Stable once the service exists — a later redeploy doesn't change
+        # it — so reading it back here works identically on the first run
+        # (service just got created above) and every run after.
+        gcloud run services describe burn-backend --region=${_REGION} --format='value(status.url)' > /workspace/backend-url.txt
+        echo "burn-backend deployed at: $(cat /workspace/backend-url.txt)"
+
+  # ---------------- frontend: my-app/ -> burn-frontend service ----------------
+  - id: frontend-install
+    name: 'gcr.io/cloud-builders/npm'
+    dir: 'my-app'
+    args: ['ci']
+
+  - id: frontend-build
+    name: 'gcr.io/cloud-builders/npm'
+    dir: 'my-app'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        export VITE_API_BASE_URL="$(cat /workspace/backend-url.txt)"
+        echo "Building frontend against VITE_API_BASE_URL=$$VITE_API_BASE_URL"
+        npm run build
+
+  # `--source=my-app` again uses the buildpack (no Dockerfile): its
+  # `gcp-build` script is a deliberate no-op (see my-app/package.json) that
+  # reuses the dist/ frontend-build just produced instead of letting the
+  # buildpack run `vite build` itself, which wouldn't have
+  # VITE_API_BASE_URL set. `npm start` -> `serve -s dist` is then the
+  # container's entrypoint — `serve` already respects Cloud Run's PORT env
+  # var and binds 0.0.0.0 by default, and `-s` is `serve`'s SPA flag (any
+  # unmatched path falls back to index.html, same as App Engine's old `/.*`
+  # handler), so no Dockerfile or extra config is needed here either.
+  - id: frontend-deploy
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
-    args: ['app', 'deploy', 'app.yaml', '--quiet']
+    args:
+      - 'run'
+      - 'deploy'
+      - 'burn-frontend'
+      - '--source=my-app'
+      - '--region=${_REGION}'
+      - '--service-account=${PROJECT_ID}@appspot.gserviceaccount.com'
+      - '--allow-unauthenticated'
+      - '--cpu=1'
+      - '--memory=256Mi'
+      - '--min-instances=0'
+      - '--max-instances=2'
+      - '--quiet'
 
 options:
   logging: CLOUD_LOGGING_ONLY

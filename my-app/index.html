@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- maximum-scale=1/user-scalable=no disable the browser's own pinch-zoom:
+         the board (NoteList.tsx) implements pinch/scroll-zoom itself, as a
+         transform on just its own container, so fixed UI elsewhere (the
+         hamburger menu, the room title) is never touched by any zoom and
+         doesn't need to be reactively repositioned out from under it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Burn</title>
   </head>
   <body>

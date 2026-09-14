@@ -9,6 +9,14 @@ import React from 'react';
 // reaches under it) and truncated with an ellipsis past that — a backstop
 // for a long room name on a narrow phone, since centering means only the
 // *first* overlap (not truncation) would otherwise be visible.
+//
+// Plain `position: fixed`, same reasoning as HeaderMenu.tsx: the board's
+// own zoom is a transform on NoteList's own container, not the browser's
+// native pinch-zoom (disabled in index.html), so there's nothing here that
+// needs to compensate for it — see HeaderMenu's comment for why that
+// distinction matters (a JS-compensated `fixed` element chasing the
+// browser's native zoom reads as shaky; a `fixed` element the zoom simply
+// never touches doesn't need chasing at all).
 export default function RoomTitle({ name }: { name: string }) {
     return (
         <div style={{

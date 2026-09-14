@@ -48,7 +48,7 @@ export default function Landing() {
             gap: '1rem',
         }}>
             <h1>🔥 Burn</h1>
-            <p>Drop notes on a shared board. Burn the ones you're done with.</p>
+            <p>Add notes on a shared board. Then BURN them!</p>
             <input
                 className="room-name-input"
                 value={name}

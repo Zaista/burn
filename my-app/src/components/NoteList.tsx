@@ -667,8 +667,19 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         }
     };
 
+    // Tracks innerWidth across resizes so a mobile on-screen keyboard
+    // opening (e.g. focusing the edit textarea in startEditingNote below)
+    // can be told apart from an actual layout change: a keyboard only ever
+    // shrinks the *height* of the viewport, never its width, while a real
+    // resize/rotation changes width too. Without this, typing into a note
+    // would silently reset the user's zoom/pan mid-edit, since focusing the
+    // textarea opens the keyboard, which fires a `resize` event just like a
+    // real one would.
+    const lastWidthRef = useRef(window.innerWidth);
     useEffect(() => {
         const onResize = () => {
+            if (window.innerWidth === lastWidthRef.current) return;
+            lastWidthRef.current = window.innerWidth;
             scaleRef.current = computeScale();
             zoomRef.current = 1;
             panRef.current = { x: 0, y: 0 };

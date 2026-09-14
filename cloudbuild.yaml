@@ -16,15 +16,30 @@
 # Wire this up to a Cloud Build trigger on push to `master`
 # (config file location: /cloudbuild.yaml), and set these substitution
 # variables on that trigger:
-#   _MONGODB_URI  the real Mongo connection string (no default here on
-#                 purpose — see backend-render-env below, it fails loudly
-#                 rather than silently deploying with no database)
-#   _REGION       defaults to europe-west3 below (inferred from this
-#                 project's existing App Engine app's region) — double
-#                 check that's actually right for you (`gcloud run services
-#                 list` or the Cloud Run console) and override on the
-#                 trigger if not; Cloud Run is regional per-service, unlike
-#                 App Engine's single app-wide region.
+#   _MONGODB_URI     the real Mongo connection string (no default here on
+#                    purpose — see backend-render-env below, it fails
+#                    loudly rather than silently deploying with no
+#                    database)
+#   _BACKEND_REGION  defaults to europe-west3 below (this project's
+#                    existing App Engine app's region). No custom domain
+#                    on this one — it's just an API the frontend's browser
+#                    code calls directly (see src/config.ts), so there's
+#                    no reason to move it once it's working.
+#   _FRONTEND_REGION defaults to europe-west1 below. Deliberately a
+#                    DIFFERENT region than the backend: Cloud Run's Domain
+#                    Mappings feature (cloud.google.com/run/docs/mapping-
+#                    custom-domains) — the simplest way to put a custom
+#                    domain (e.g. burn.jovanilic.com) in front of
+#                    burn-frontend — only supports a handful of regions,
+#                    europe-west1 and europe-west4 among them; europe-west3
+#                    (the backend's region) isn't one. This is fine: the
+#                    frontend is just static files served to the browser,
+#                    which then calls burn-backend directly wherever THAT
+#                    is — the two services never talk to each other
+#                    server-side, so there's no latency cost to them being
+#                    in different regions.
+# Cloud Run is regional per-service, unlike App Engine's single app-wide
+# region — these two vars can be (and here, deliberately are) different.
 # A plain trigger substitution for _MONGODB_URI is visible in the build's
 # logs/history — move it to a Secret Manager-backed secret (`--set-secrets`
 # on backend-deploy below) instead if that's not acceptable.
@@ -72,7 +87,8 @@
 
 substitutions:
   _MONGODB_URI: "" # real value comes from the trigger config; empty here just avoids a hard failure on an ad-hoc manual build
-  _REGION: "europe-west3"
+  _BACKEND_REGION: "europe-west3"
+  _FRONTEND_REGION: "europe-west1"
 
 steps:
   # ---------------- backend: src/ -> burn-backend service ----------------
@@ -199,7 +215,7 @@ steps:
         set -euo pipefail
         gcloud run deploy burn-backend \
           --source=. \
-          --region=${_REGION} \
+          --region=${_BACKEND_REGION} \
           --service-account=${PROJECT_ID}@appspot.gserviceaccount.com \
           --allow-unauthenticated \
           --session-affinity \
@@ -215,7 +231,7 @@ steps:
         # Stable once the service exists — a later redeploy doesn't change
         # it — so reading it back here works identically on the first run
         # (service just got created above) and every run after.
-        gcloud run services describe burn-backend --region=${_REGION} --format='value(status.url)' > /workspace/backend-url.txt
+        gcloud run services describe burn-backend --region=${_BACKEND_REGION} --format='value(status.url)' > /workspace/backend-url.txt
         echo "burn-backend deployed at: $(cat /workspace/backend-url.txt)"
 
   # ---------------- frontend: my-app/ -> burn-frontend service ----------------
@@ -263,7 +279,7 @@ steps:
       - 'deploy'
       - 'burn-frontend'
       - '--source=my-app'
-      - '--region=${_REGION}'
+      - '--region=${_FRONTEND_REGION}'
       - '--service-account=${PROJECT_ID}@appspot.gserviceaccount.com'
       - '--allow-unauthenticated'
       - '--cpu=1'

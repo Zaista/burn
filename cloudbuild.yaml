@@ -30,16 +30,37 @@
 # on backend-deploy below) instead if that's not acceptable.
 #
 # One-time prerequisites this file assumes are already done:
-#   - Cloud Run API and Artifact Registry API enabled on the project
-#   - the Cloud Build service account has, at minimum: roles/run.admin
-#     (deploy/manage the services, including making them public — see
-#     --allow-unauthenticated below), roles/iam.serviceAccountUser (to
-#     deploy AS the runtime service account named below), and
-#     roles/artifactregistry.writer (a `--source` deploy builds a
-#     container and pushes it to Artifact Registry, auto-creating a
-#     `cloud-run-source-deploy` repo the first time). Exact role names
-#     drift over time — if a step fails on a permission, the gcloud error
-#     message names the missing one.
+#   - Cloud Run API, Artifact Registry API, and Cloud Build API all enabled
+#     on the project.
+#   - the Cloud Build service account (a custom one, if your trigger is
+#     configured with one, rather than the default
+#     PROJECT_NUMBER@cloudbuild.gserviceaccount.com) has, at minimum:
+#       - roles/run.admin — deploy/manage the services, including making
+#         them public (see --allow-unauthenticated below).
+#       - roles/iam.serviceAccountUser — to deploy AS the runtime service
+#         account named below.
+#       - roles/cloudbuild.builds.editor — `gcloud run deploy --source`
+#         doesn't build the container itself, it submits a SEPARATE, nested
+#         Cloud Build job to do that via buildpacks (the same thing
+#         `gcloud builds submit --pack` does) — this is what lets the
+#         calling identity submit that nested build.
+#       - roles/artifactregistry.admin — a `--source` deploy pushes the
+#         built image to Artifact Registry, auto-creating a
+#         `cloud-run-source-deploy` repo the first time any service in the
+#         project deploys this way. roles/artifactregistry.writer can push
+#         to an EXISTING repo but can't create a new one, which is exactly
+#         what's needed on that very first deploy — either grant .admin, or
+#         have someone with sufficient rights pre-create the repo once
+#         (`gcloud artifactregistry repositories create
+#         cloud-run-source-deploy --repository-format=docker
+#         --location=$REGION`), after which .writer is enough from then on.
+#     Don't count on the gcloud error message to name which of these is
+#     missing — "PERMISSION_DENIED: The caller does not have permission" is
+#     all it says. To find the actual permission that got denied, check
+#     Cloud Logging for the failed build's timestamp, filtered to
+#     `protoPayload.status.code=7` — the audit log entry's
+#     `authorizationInfo` names the exact permission (e.g.
+#     `run.services.create`, `artifactregistry.repositories.create`).
 #   - if your org has a policy restricting public (allUsers) Cloud Run
 #     access, --allow-unauthenticated below will fail even with the right
 #     IAM roles — that's an org policy exception, not something this file

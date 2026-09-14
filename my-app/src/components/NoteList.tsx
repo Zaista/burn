@@ -525,18 +525,31 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
             window.removeEventListener('orientationchange', onResize);
         };
     }, []);
-    // Ids of notes that arrived with an `ignite` flag (created directly on
-    // the coal) — consumed once that note's canvas has actually painted
-    // itself, since starting the burn any earlier would snapshot a blank
-    // canvas as the "pristine" note.
-    const igniteOnReady = useRef<Set<string>>(new Set());
-    // Grabs from the dispenser that are waiting on their real note to come
-    // back from the server, keyed by a token unique to that grab. Until
-    // then the template canvas stays at the drop point instead of snapping
-    // back — otherwise there's a gap (a server round trip wide) where
-    // neither the template nor the real note occupies that spot, which
-    // reads as the note flickering out and back in.
-    const pendingSpawns = useRef<Map<string, { canvas: HTMLCanvasElement; slotX: number; slotY: number }>>(new Map());
+    // Grabs from the dispenser, keyed by a token unique to that grab. The
+    // real note is created the moment a grab turns into an actual drag (see
+    // the dispenser effect below) — well before it's dropped — so every
+    // other client sees it appear immediately instead of only once this
+    // client lets go of it. `realId` is filled in once the server's
+    // `noteAdded` echoes back (see the addNote handler); `dropped` is filled
+    // in once this client actually releases the pointer (see onpointerup).
+    // A grab is only finalized (see tryFinalizeDispenserSpawn) once BOTH are
+    // set — whichever happens second triggers it — since until then we
+    // don't yet know either the note's real id or where it landed.
+    const pendingSpawns = useRef<Map<string, {
+        canvas: HTMLCanvasElement;
+        slotX: number;
+        slotY: number;
+        realId?: string;
+        dropped?: { x: number; y: number };
+    }>>(new Map());
+    // Real note ids spawned by THIS client dragging them off the dispenser
+    // that are still being actively dragged (not yet dropped). Their real
+    // canvas already exists — and is fully live for every other client,
+    // including receiving this client's own note_dragging updates — but is
+    // kept hidden on THIS client until the drag ends, since the dispenser's
+    // template canvas is what's actually tracking the pointer during that
+    // window; showing both at once would look like a visible duplicate.
+    const dispenserOriginNoteIds = useRef<Set<string>>(new Set());
     // A shared, ever-increasing counter: whichever note was grabbed most
     // recently — by this client or, via note_dragging, another one — gets
     // the highest z-index and stays on top, like the last sticky note you
@@ -749,6 +762,59 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         }, ignitionPoint);
     };
 
+    // Completes a dispenser grab once both halves of it are known: the real
+    // note's id (from the server's noteAdded, via the addNote handler below)
+    // and where this client actually dropped it (from onpointerup) — either
+    // can arrive first, so both call sites call this and it only acts once
+    // neither is missing. From here on it's just "a regular note was dropped
+    // somewhere", reusing the exact same coal-check/burn/move-and-persist
+    // logic as dragging any already-placed note.
+    const tryFinalizeDispenserSpawn = (token: string, attemptsLeft = 30) => {
+        const pending = pendingSpawns.current.get(token);
+        if (!pending || !pending.realId || !pending.dropped) return;
+        const { canvas, slotX, slotY, realId, dropped } = pending;
+
+        // The real note's own canvas (rendered from `visibleNotes`, once
+        // React processes the noteAdded state update) might not exist yet —
+        // the server's response and this client's own drop can in principle
+        // land in the very same tick. Wait a frame and retry rather than
+        // silently dropping the final position (or a burn).
+        const realCanvas = canvasRefs.current[realId];
+        if (!realCanvas) {
+            if (attemptsLeft > 0) requestAnimationFrame(() => tryFinalizeDispenserSpawn(token, attemptsLeft - 1));
+            return;
+        }
+
+        pendingSpawns.current.delete(token);
+        dispenserOriginNoteIds.current.delete(realId);
+        realCanvas.style.visibility = ''; // reveal — the template below takes its place
+
+        // The real canvas has been sitting (invisibly) whereever it was
+        // first created — near the dispenser, at the position sent with the
+        // original addNote — since it never actually followed the drag (see
+        // the dispenser effect above, where only the template canvas
+        // tracks the pointer). Move it to the actual drop point before
+        // doing anything else with it, so a burn started below ignites at
+        // the coal, not back at the dispenser.
+        realCanvas.style.left = `${dropped.x}px`;
+        realCanvas.style.top = `${dropped.y}px`;
+
+        // Snap the template back to its slot — the real note's own canvas
+        // (already live for every other client since the moment it was
+        // grabbed) takes over from here.
+        canvas.style.left = `${slotX}px`;
+        canvas.style.top = `${slotY}px`;
+
+        if (isOverCoal(dropped.x, dropped.y)) {
+            triggerBurn(realId, true);
+            return;
+        }
+        const fx = topLeftToCenterFraction(dropped.x, BOARD_WIDTH);
+        const fy = topLeftToCenterFraction(dropped.y, BOARD_HEIGHT);
+        socket.emit('note_drag_end', { id: realId, x: fx, y: fy });
+        setNotePosition(realId, fx, fy);
+    };
+
     // Notes that have finished burning are dropped from the board entirely.
     const visibleNotes = useMemo(
         () => (notes ?? []).filter((note) => !burnedIds.has(note._id)),
@@ -762,26 +828,25 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
     // The server broadcasts noteAdded to every client (including the one that
     // created it) — drop it straight into the SWR cache instead of waiting on
-    // the next revalidation, so new notes show up instantly. A note created
-    // directly on the coal carries `ignite: true`; every client records
-    // that here (synchronously, via a ref — no race with the re-render this
-    // triggers) so the per-note init effect can start burning it the moment
-    // its canvas is actually painted.
-    const addNote = (note: Note & { ignite?: boolean; clientToken?: string }) => {
-        if (note.ignite) igniteOnReady.current.add(note._id);
-        // The real note has arrived — now it's safe to send the dispenser
-        // template that spawned it back to its slot without a visible gap.
-        if (note.clientToken) {
-            const pending = pendingSpawns.current.get(note.clientToken);
-            if (pending) {
-                pending.canvas.style.left = `${pending.slotX}px`;
-                pending.canvas.style.top = `${pending.slotY}px`;
-                pendingSpawns.current.delete(note.clientToken);
-            }
-        }
+    // the next revalidation, so new notes show up instantly (this is what
+    // makes a note grabbed from the dispenser visible to everyone else right
+    // away, at wherever it currently is, rather than only once it's dropped).
+    const addNote = (note: Note & { clientToken?: string }) => {
         mutate(current => (current?.some(n => n._id === note._id) ? current : [...(current ?? []), note]), {
             revalidate: false,
         });
+        // This is the real note a dispenser grab (see the dispenser effect
+        // below) was waiting on — record its id, and keep our own copy of
+        // its canvas hidden for now if that grab is still in progress (i.e.
+        // hasn't been dropped yet — see dispenserOriginNoteIds above).
+        if (note.clientToken) {
+            const pending = pendingSpawns.current.get(note.clientToken);
+            if (pending) {
+                pending.realId = note._id;
+                if (!pending.dropped) dispenserOriginNoteIds.current.add(note._id);
+                tryFinalizeDispenserSpawn(note.clientToken);
+            }
+        }
     };
 
     // Tells the server which room this socket belongs to, so every event it
@@ -845,19 +910,24 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         };
     // addNote/setNotePosition/setNoteText aren't in the deps array on
     // purpose: each only touches refs (canvasRefs, pendingSpawns,
-    // igniteOnReady) or mutate's functional-update form, never a stale
-    // reactive value directly, so the listeners registered at mount stay
-    // correct for the life of the component — no need to re-subscribe every
-    // render just to satisfy exhaustive-deps.
+    // dispenserOriginNoteIds) or mutate's functional-update form, never a
+    // stale reactive value directly, so the listeners registered at mount
+    // stay correct for the life of the component — no need to re-subscribe
+    // every render just to satisfy exhaustive-deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // The corner dispenser: DISPENSER_COUNT template notes that are never
-    // spent. Dragging one off spawns a real note at the drop point (via
-    // addNote's position, so it's already "placed" the moment it arrives —
-    // see paintNote/isPlaced above) while the template itself snaps back to
-    // its slot, ready to be grabbed again. Runs once — the dispenser has
-    // nothing to do with which real notes exist.
+    // spent. Dragging one off spawns a real note the instant that grab turns
+    // into an actual drag — not at the drop, see onpointermove below — so
+    // every other client sees it appear immediately and can watch it get
+    // dragged around, instead of only seeing it pop into existence once
+    // released. This client keeps dragging the template canvas exactly as
+    // before; the real note's own canvas (already live for everyone else)
+    // stays hidden here until the drop (see dispenserOriginNoteIds), at
+    // which point the template snaps back to its slot, ready to be grabbed
+    // again. Runs once — the dispenser has nothing to do with which real
+    // notes exist.
     useEffect(() => {
         for (let i = 0; i < DISPENSER_COUNT; i++) {
             const canvas = dispenserRefs.current[i];
@@ -878,11 +948,16 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
 
             let dragOrigin: { pointerX: number; pointerY: number } | null = null;
             let dragged = false;
+            // Set the moment this grab creates a real note (see
+            // onpointermove) — lets onpointerup know which pendingSpawns
+            // entry this drop resolves.
+            let activeToken: string | null = null;
 
             canvas.onpointerdown = (e) => {
                 canvas.setPointerCapture(e.pointerId);
                 bringToFront(canvas);
                 dragged = false;
+                activeToken = null;
                 dragOrigin = { pointerX: e.clientX, pointerY: e.clientY };
             };
 
@@ -896,11 +971,33 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                 const screenDx = e.clientX - dragOrigin.pointerX;
                 const screenDy = e.clientY - dragOrigin.pointerY;
                 if (!dragged && Math.hypot(screenDx, screenDy) < DRAG_THRESHOLD) return;
+                const justGrabbed = !dragged;
                 dragged = true;
                 const dx = screenDx / scaleRef.current;
                 const dy = screenDy / scaleRef.current;
-                canvas.style.left = `${slotX + dx}px`;
-                canvas.style.top = `${slotY + dy}px`;
+                const x = slotX + dx;
+                const y = slotY + dy;
+                canvas.style.left = `${x}px`;
+                canvas.style.top = `${y}px`;
+
+                const fx = topLeftToCenterFraction(x, BOARD_WIDTH);
+                const fy = topLeftToCenterFraction(y, BOARD_HEIGHT);
+
+                if (justGrabbed) {
+                    activeToken = `${Date.now()}-${Math.random()}`;
+                    pendingSpawns.current.set(activeToken, { canvas, slotX, slotY });
+                    socket.emit('addNote', { text: '', position: { x: fx, y: fy }, clientToken: activeToken });
+                } else if (activeToken) {
+                    // Live position only (no DB write here, too frequent —
+                    // same as an already-placed note being dragged) — and
+                    // only once the real id has actually come back; a few
+                    // early frames are dropped otherwise, which self-heals
+                    // as soon as it resolves.
+                    const pending = pendingSpawns.current.get(activeToken);
+                    if (pending?.realId) {
+                        socket.emit('note_dragging', { id: pending.realId, x: fx, y: fy });
+                    }
+                }
             };
 
             canvas.onpointerup = (e) => {
@@ -915,31 +1012,29 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                     canvas.style.top = `${slotY}px`;
                     return;
                 }
-                // Stay at the drop point — don't snap back to the slot yet.
-                // The dispenser is infinite (grabbing one doesn't shrink the
-                // pile), but resetting immediately would leave a gap where
-                // neither this template nor the real note (still in flight
-                // to the server) occupies the drop spot, which reads as a
-                // flicker. addNote's matching noteAdded snaps it back once
-                // the real note is actually ready to take over.
-                const token = `${Date.now()}-${Math.random()}`;
-                pendingSpawns.current.set(token, { canvas, slotX, slotY });
-                // Safety net: if a response never arrives (dropped
+                const token = activeToken;
+                activeToken = null;
+                const pending = token ? pendingSpawns.current.get(token) : undefined;
+                if (!token || !pending) return; // dragged implies justGrabbed already set this above
+                pending.dropped = { x: dropX, y: dropY };
+                // Safety net: if the real note's id never arrives (dropped
                 // connection, server error), don't leave the template
                 // stranded off its slot forever.
                 setTimeout(() => {
-                    if (!pendingSpawns.current.delete(token)) return;
+                    if (!pendingSpawns.current.delete(token)) return; // already resolved
                     canvas.style.left = `${slotX}px`;
                     canvas.style.top = `${slotY}px`;
                 }, 4000);
-                socket.emit('addNote', {
-                    text: '',
-                    position: { x: topLeftToCenterFraction(dropX, BOARD_WIDTH), y: topLeftToCenterFraction(dropY, BOARD_HEIGHT) },
-                    ignite: isOverCoal(dropX, dropY),
-                    clientToken: token,
-                });
+                tryFinalizeDispenserSpawn(token);
             };
         }
+    // tryFinalizeDispenserSpawn isn't in the deps array on purpose, same
+    // reasoning as the socket-listener effect above: it only touches refs
+    // and other ref-only functions (isOverCoal, setNotePosition,
+    // triggerBurn), so the closures wired up here at mount stay correct —
+    // no need to re-run this whole effect (and re-paint/rewire every
+    // dispenser slot) just to satisfy exhaustive-deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useEffect(() => {
@@ -974,14 +1069,19 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
                 canvas.style.top = `${LEGACY_STACK_ORIGIN.y + slot * STACK_OFFSET_STEP}px`;
             }
 
+            // A grab from the dispenser (see the dispenser effect below)
+            // that's still in progress on THIS client — its real canvas is
+            // already live for everyone else, but stays hidden here until
+            // the drag ends, since the dispenser's own template canvas is
+            // what's actually tracking the pointer until then.
+            if (dispenserOriginNoteIds.current.has(note._id)) {
+                canvas.style.visibility = 'hidden';
+            }
+
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            renderNote(ctx, canvas, note.text ?? '', () => {
-                // Created directly on the coal — ignite now that the
-                // canvas actually has the note artwork painted on it.
-                if (igniteOnReady.current.delete(note._id)) triggerBurn(note._id, false);
-            });
+            renderNote(ctx, canvas, note.text ?? '');
 
             canvas.ondblclick = () => startEditingNote(note._id);
 

@@ -77,6 +77,7 @@ steps:
     args:
       - '-c'
       - |
+        set -euo pipefail
         if [ -z "$$MONGODB_URI" ]; then
           echo 'ERROR: _MONGODB_URI substitution is not set on the trigger' >&2
           exit 1
@@ -162,6 +163,15 @@ steps:
     args:
       - '-c'
       - |
+        # Without this, a failed `gcloud run deploy` below wouldn't stop the
+        # script — it'd fall through to `gcloud run services describe`
+        # (which would also fail, since nothing got deployed), then the
+        # final `echo` would still exit 0, so Cloud Build would log this
+        # whole step as *succeeded* despite nothing having deployed. That's
+        # exactly what let a real run limp forward into building the
+        # frontend against an empty VITE_API_BASE_URL instead of stopping
+        # here where the actual problem was.
+        set -euo pipefail
         gcloud run deploy burn-backend \
           --source=. \
           --region=${_REGION} \
@@ -196,7 +206,18 @@ steps:
     args:
       - '-c'
       - |
+        set -euo pipefail
         export VITE_API_BASE_URL="$(cat /workspace/backend-url.txt)"
+        # Belt-and-suspenders: backend-deploy failing fast (see set -euo
+        # pipefail there) should already stop the build before this step
+        # ever runs, but check anyway rather than silently shipping a
+        # frontend that falls back to localhost in production (see
+        # src/config.ts) if that file ever comes back empty for some other
+        # reason.
+        if [ -z "$$VITE_API_BASE_URL" ]; then
+          echo 'ERROR: backend URL is empty — backend-deploy did not write /workspace/backend-url.txt correctly' >&2
+          exit 1
+        fi
         echo "Building frontend against VITE_API_BASE_URL=$$VITE_API_BASE_URL"
         npm run build
 

@@ -27,7 +27,16 @@ body {
   display: flex;
   place-items: center;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100vh; /* fallback for browsers without svh support */
+  /* Mobile Chrome (and others) size the `vh` unit against the *largest*
+     possible viewport — chrome/address-bar hidden — not whatever's
+     actually visible. Sizing the body to that then makes it taller than
+     the visible area while the address bar IS showing (e.g. right after
+     load), producing a few pixels of page-level scroll for no real
+     content. `svh` ("small viewport height") is sized against the
+     visible area with the browser chrome shown, so the body actually
+     fits and that scroll goes away. */
+  min-height: 100svh;
 }
 
 h1 {

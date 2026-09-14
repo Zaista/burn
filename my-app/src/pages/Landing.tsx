@@ -44,7 +44,7 @@ export default function Landing() {
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
-            minHeight: '80vh',
+            minHeight: '80svh', // see index.css's body rule for why svh, not vh
             gap: '1rem',
         }}>
             <h1>🔥 Burn</h1>
@@ -68,7 +68,12 @@ export default function Landing() {
                     <h2 style={{ fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em', opacity: 0.6, margin: '0 0 0.5rem' }}>
                         Your rooms
                     </h2>
-                    <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    {/* Capped and independently scrollable so a long list
+                        scrolls within itself instead of growing the whole
+                        page past one viewport — on a phone especially, that
+                        used to hand you a page-level scrollbar for what's
+                        otherwise a single fixed screen. */}
+                    <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '0.4rem', maxHeight: '35vh', overflowY: 'auto' }}>
                         {rooms.map((room) => (
                             <li key={room.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
                                 <Link to={`/room/${room.id}`}>{room.name}</Link>

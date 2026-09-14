@@ -984,6 +984,13 @@ const NoteList: React.FC<{ roomId: string }> = ({ roomId }) => {
         pendingSpawns.current.delete(token);
         dispenserOriginNoteIds.current.delete(realId);
         realCanvas.style.visibility = ''; // reveal — the template below takes its place
+        // bringToFront was only ever called on the *template* canvas during
+        // the drag (see its onpointerdown below) — the real canvas stayed
+        // hidden this whole time and never got its own z-index bumped, so
+        // without this it could surface behind a note dragged more recently
+        // than it was created, instead of on top like a just-dragged note
+        // should be.
+        bringToFront(realCanvas);
 
         // The real canvas has been sitting (invisibly) whereever it was
         // first created — near the dispenser, at the position sent with the

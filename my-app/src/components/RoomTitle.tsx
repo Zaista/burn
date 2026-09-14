@@ -4,11 +4,13 @@ import React from 'react';
 // fixed at creation — there's no rename affordance (see CLAUDE.md / POST
 // /rooms) — so this is a plain, static label, not editable in place.
 //
-// Capped to leave room for HeaderMenu's hamburger button in the opposite
-// corner (roughly 2x its own width plus gutter, so the centered title never
-// reaches under it) and truncated with an ellipsis past that — a backstop
-// for a long room name on a narrow phone, since centering means only the
-// *first* overlap (not truncation) would otherwise be visible.
+// max-width (the `.room-title` class, see App.css) leaves room for
+// HeaderMenu's actions in the opposite corner — however much space those
+// currently need, compact hamburger icon or uncollapsed buttons, at the
+// same breakpoint HeaderMenu itself switches on — so the centered title
+// never reaches under them, truncating with an ellipsis past that as a
+// backstop for a long room name, since centering means only the *first*
+// overlap (not truncation) would otherwise be visible.
 //
 // Plain `position: fixed`, same reasoning as HeaderMenu.tsx: the board's
 // own zoom is a transform on NoteList's own container, not the browser's
@@ -19,14 +21,13 @@ import React from 'react';
 // never touches doesn't need chasing at all).
 export default function RoomTitle({ name }: { name: string }) {
     return (
-        <div style={{
+        <div className="room-title" style={{
             position: 'fixed',
             top: 16,
             left: '50%',
             transform: 'translateX(-50%)',
             zIndex: 9999,
             textAlign: 'center',
-            maxWidth: 'calc(100vw - 120px)',
         }}>
             <h2 style={{ margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {name || 'Untitled room'}

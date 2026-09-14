@@ -31,3 +31,32 @@
   color: #9a9aa2;
 }
 
+/* HeaderMenu/RoomTitle's shared breakpoint: below it there isn't reliably
+   enough width for Home and Share as their own two full-size buttons next
+   to RoomTitle's centered room name without the two colliding, so
+   HeaderMenu collapses them behind a single hamburger icon instead (see
+   HeaderMenu.tsx) and RoomTitle reserves less space for it accordingly.
+   700px comfortably covers a phone in either orientation while still
+   switching to the uncollapsed buttons on a small tablet/laptop. */
+.header-menu-wide {
+  display: none;
+  align-items: center;
+  gap: 8px;
+}
+.header-menu-compact {
+  display: block;
+}
+.room-title {
+  max-width: calc(100vw - 120px); /* leaves room for the compact hamburger icon */
+}
+@media (min-width: 700px) {
+  .header-menu-wide {
+    display: flex;
+  }
+  .header-menu-compact {
+    display: none;
+  }
+  .room-title {
+    max-width: calc(100vw - 300px); /* leaves room for the two uncollapsed buttons */
+  }
+}

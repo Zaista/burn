@@ -2,13 +2,15 @@ import React, { useEffect, useRef, useState } from 'react';
 import HomeButton from './HomeButton';
 import ShareLink from './ShareLink';
 
-// The room header's actions (leave the room, share its link), collapsed
-// behind a single hamburger button instead of sitting in the top-right
-// corner as their own full-width buttons. Two wide buttons there used to
-// collide with RoomTitle's centered room name on a narrow phone screen —
-// see the fixed top-right corner + centered title in RoomPage/RoomTitle —
-// a single small icon leaves the title far more room before that happens,
-// and RoomTitle itself now truncates instead of overlapping as a backstop.
+// The room header's actions (leave the room, share its link). On a wide
+// enough screen (see the shared breakpoint in App.css) they sit directly in
+// the top-right corner as their own two buttons; below that there isn't
+// reliably enough width for them next to RoomTitle's centered room name
+// without the two colliding, so they collapse behind a single hamburger
+// button instead. Both layouts are mounted at once — .header-menu-wide and
+// .header-menu-compact toggle via that breakpoint's media query in App.css
+// — rather than picked in JS, so switching is instant and doesn't need to
+// watch the viewport itself.
 //
 // `position: fixed` (rather than living inside NoteList's board) is what
 // keeps this pinned to the real screen corner regardless of NoteList's own
@@ -29,7 +31,8 @@ export default function HeaderMenu() {
     // Closes on an outside click/tap or Escape — a dropdown that only
     // closes via its own toggle button feels stuck, especially on mobile
     // where there's no natural "click elsewhere to dismiss" affordance
-    // unless it's wired up explicitly.
+    // unless it's wired up explicitly. Only relevant to the compact
+    // (dropdown) layout — the wide layout has nothing to open/close.
     useEffect(() => {
         if (!open) return;
         const onPointerDown = (e: PointerEvent) => {
@@ -47,38 +50,45 @@ export default function HeaderMenu() {
     }, [open]);
 
     return (
-        <div ref={containerRef} style={{ position: 'fixed', top: 16, right: 16, zIndex: 9999 }}>
-            <button
-                onClick={() => setOpen(o => !o)}
-                aria-label="Room menu"
-                aria-expanded={open}
-                style={{ fontSize: '1.1em', lineHeight: 1, padding: '0.55em 0.7em' }}
-            >
-                ☰
-            </button>
-            {open && (
-                <div
-                    className="header-menu-panel"
-                    style={{
-                        position: 'absolute',
-                        top: 'calc(100% + 8px)',
-                        right: 0,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 6,
-                        padding: 8,
-                        borderRadius: 10,
-                        background: '#ffffff',
-                        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.18)',
-                        minWidth: 160,
-                    }}
+        <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 9999 }}>
+            <div className="header-menu-wide">
+                <HomeButton />
+                <ShareLink />
+            </div>
+            <div ref={containerRef} className="header-menu-compact">
+                <button
+                    onClick={() => setOpen(o => !o)}
+                    aria-label="Room menu"
+                    aria-expanded={open}
+                    style={{ fontSize: '1.1em', lineHeight: 1, padding: '0.55em 0.7em' }}
                 >
-                    {/* Navigating away unmounts RoomPage (and this menu with
-                        it), so there's no need to close it explicitly here. */}
-                    <HomeButton />
-                    <ShareLink />
-                </div>
-            )}
+                    ☰
+                </button>
+                {open && (
+                    <div
+                        className="header-menu-panel"
+                        style={{
+                            position: 'absolute',
+                            top: 'calc(100% + 8px)',
+                            right: 0,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 6,
+                            padding: 8,
+                            borderRadius: 10,
+                            background: '#ffffff',
+                            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.18)',
+                            minWidth: 160,
+                        }}
+                    >
+                        {/* Navigating away unmounts RoomPage (and this menu
+                            with it), so there's no need to close it
+                            explicitly here. */}
+                        <HomeButton />
+                        <ShareLink />
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

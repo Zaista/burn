@@ -54,13 +54,17 @@
 #         (`gcloud artifactregistry repositories create
 #         cloud-run-source-deploy --repository-format=docker
 #         --location=$REGION`), after which .writer is enough from then on.
-#     Don't count on the gcloud error message to name which of these is
-#     missing — "PERMISSION_DENIED: The caller does not have permission" is
-#     all it says. To find the actual permission that got denied, check
-#     Cloud Logging for the failed build's timestamp, filtered to
-#     `protoPayload.status.code=7` — the audit log entry's
-#     `authorizationInfo` names the exact permission (e.g.
-#     `run.services.create`, `artifactregistry.repositories.create`).
+#       - roles/storage.admin — `--source` uploads your local source to a
+#         GCS staging bucket (`run-sources-...`) before handing it to the
+#         nested build, auto-creating that bucket the first time too.
+#     Some of these show up in the gcloud error with the exact missing
+#     permission named (e.g. "does not have storage.buckets.create
+#     access...") — grant that one and retry. Others are less specific
+#     ("PERMISSION_DENIED: The caller does not have permission", no
+#     permission named) — for those, check Cloud Logging for the failed
+#     build's timestamp, filtered to `protoPayload.status.code=7`; the
+#     audit log entry's `authorizationInfo` names the exact permission that
+#     was denied.
 #   - if your org has a policy restricting public (allUsers) Cloud Run
 #     access, --allow-unauthenticated below will fail even with the right
 #     IAM roles — that's an org policy exception, not something this file
